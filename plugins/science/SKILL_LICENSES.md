@@ -13,6 +13,12 @@ Skill                                | Reference Url(s)
 alphafold-database-fetch-and-analyze | https://alphafold.ebi.ac.uk/
 alphagenome-single-variant-analysis  | https://deepmind.google.com/science/alphagenome/
 chembl-database                      | https://chembl.gitbook.io/chembl-interface-documentation/about
+cheminformatics-cofolding            | https://www.rdkit.org/, https://github.com/google-deepmind/alphafold3, and https://github.com/jwohlwend/boltz
+cheminformatics-core                 | https://www.rdkit.org/, https://chembl.gitbook.io/chembl-interface-documentation/about, https://pubchem.ncbi.nlm.nih.gov/docs/citation-guidelines, https://webbook.nist.gov/chemistry/, and https://openbabel.org/
+cheminformatics-doc2mol              | https://www.rdkit.org/, https://opsin.ch.cam.ac.uk, https://pubchem.ncbi.nlm.nih.gov/docs/citation-guidelines, https://patents.google.com/, and https://open-reaction-database.org/
+cheminformatics-ml                   | https://www.rdkit.org/ and https://scikit-learn.org/
+cheminformatics-physics              | https://www.rdkit.org/, https://github.com/ccsb-scripps/AutoDock-Vina, https://sourceforge.net/projects/smina/, https://openmm.org/, and https://openforcefield.org/
+cheminformatics-reactions            | https://www.rdkit.org/ and https://github.com/rdkit/rdkit
 clinical-trials-database             | https://clinicaltrials.gov/
 clinvar-database                     | https://www.ncbi.nlm.nih.gov/clinvar/
 dbsnp-database                       | https://www.ncbi.nlm.nih.gov/snp/
@@ -28,7 +34,7 @@ jaspar-database                      | https://jaspar.elixir.no/ and https://jas
 literature-search-arxiv              | https://info.arxiv.org/help/api/index.html
 literature-search-biorxiv            | https://api.biorxiv.org/ and https://www.biorxiv.org/content/about-biorxiv
 literature-search-europepmc          | https://europepmc.org/
-literature-search-openalex           | https://developers.openalex.org/
+literature-search-openalex           | https://help.openalex.org/
 ncbi-sequence-fetch                  | https://www.ncbi.nlm.nih.gov/ and https://www.ncbi.nlm.nih.gov/home/about/policies/
 openfda-database                     | https://open.fda.gov/apis/ and https://open.fda.gov/license
 opentargets-database                 | https://platform-docs.opentargets.org/licence
@@ -39,6 +45,7 @@ pubchem-database                     | https://pubchem.ncbi.nlm.nih.gov/docs/cit
 pubmed-database                      | https://pubmed.ncbi.nlm.nih.gov/disclaimer/ and https://www.ncbi.nlm.nih.gov/home/about/policies/
 pymol                                | https://www.pymol.org/
 quickgo-database                     | https://www.ebi.ac.uk/QuickGO/ and https://www.ebi.ac.uk/QuickGO/api/index.html
+rdkit-general                        | https://www.rdkit.org/, https://opsin.ch.cam.ac.uk, and https://pubchem.ncbi.nlm.nih.gov/docs/citation-guidelines
 reactome-database                    | https://reactome.org/license and https://reactome.org/cite
 string-database                      | https://string-db.org/cgi/access
 ucsc-conservation-and-tfbs           | https://genome.ucsc.edu/conditions.html and https://genome.ucsc.edu/goldenPath/help/api.html

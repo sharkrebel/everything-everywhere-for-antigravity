@@ -1,7 +1,7 @@
 {
   "name": "chrome-devtools-plugin",
   "displayName": "Chrome DevTools",
-  "version": "0.21.0",
+  "version": "1.10.1",
   "description": "Reliable automation, in-depth debugging, and performance analysis in Chrome using Chrome DevTools and Puppeteer",
   "logo": "https://www.gstatic.com/images/branding/productlogos/chrome/v7/192px.svg",
   "author": {

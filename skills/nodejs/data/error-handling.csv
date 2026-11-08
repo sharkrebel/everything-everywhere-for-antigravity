@@ -1,0 +1,1365 @@
+No,Pattern Name,Keywords,Context,Do,Dont,Code Good,Code Bad,Severity,Package
+1,Custom Error Classes,"custom error, extends Error, error class, statusCode, error code","When you need to distinguish between different error types in your application and attach metadata like HTTP status codes or error codes to exceptions","Create a base AppError class that extends Error and sets the name property; add statusCode and error code fields; always call super(message) and Object.setPrototypeOf for correct instanceof behavior","Throw plain strings or generic Error objects without context; forget to set Object.setPrototypeOf which breaks instanceof checks in TypeScript","export class AppError extends Error {
+  public readonly statusCode: number;
+  public readonly code: string;
+  public readonly isOperational: boolean;
+
+  constructor(message: string, statusCode: number, code: string, isOperational = true) {
+    super(message);
+    this.statusCode = statusCode;
+    this.code = code;
+    this.isOperational = isOperational;
+    this.name = this.constructor.name;
+    Object.setPrototypeOf(this, new.target.prototype);
+    Error.captureStackTrace(this, this.constructor);
+  }
+}
+
+export class NotFoundError extends AppError {
+  constructor(resource: string, id: string) {
+    super(`${resource} with id ${id} not found`, 404, 'RESOURCE_NOT_FOUND');
+  }
+}
+
+export class ConflictError extends AppError {
+  constructor(message: string) {
+    super(message, 409, 'CONFLICT');
+  }
+}
+
+// Usage
+throw new NotFoundError('User', '123');","// Bad: throwing plain strings
+throw 'Something went wrong';
+
+// Bad: generic Error with no context
+throw new Error('Not found');
+
+// Bad: forgetting Object.setPrototypeOf
+class BadError extends Error {
+  constructor(message: string) {
+    super(message);
+    // Missing Object.setPrototypeOf
+    // instanceof checks will fail!
+  }
+}
+
+// Bad: using status codes in random places
+if (!user) {
+  const err: any = new Error('not found');
+  err.status = 404;
+  throw err;
+}",error,
+2,Express Error Middleware,"express, error middleware, error handler, centralized, next(err)","When building an Express API and you need a centralized place to catch and format all errors instead of handling them in every route","Define a 4-parameter middleware (err, req, res, next) registered after all routes; check if err is an instance of your custom AppError; log the error; send a structured JSON response","Forget the 4th parameter (next) which makes Express treat it as a normal middleware; send stack traces to the client in production; forget to call next(err) in route handlers","import { Request, Response, NextFunction } from 'express';
+import { AppError } from './errors';
+import { logger } from './logger';
+
+export function errorHandler(
+  err: Error,
+  req: Request,
+  res: Response,
+  _next: NextFunction
+): void {
+  if (err instanceof AppError) {
+    logger.warn({ err, path: req.path }, 'Operational error');
+    res.status(err.statusCode).json({
+      status: 'error',
+      code: err.code,
+      message: err.message,
+    });
+    return;
+  }
+
+  logger.error({ err, path: req.path }, 'Unexpected error');
+  res.status(500).json({
+    status: 'error',
+    code: 'INTERNAL_ERROR',
+    message: 'An unexpected error occurred',
+  });
+}
+
+// Registration
+const app = express();
+app.use('/api', apiRouter);
+app.use(errorHandler); // Must be LAST","// Bad: 3-parameter middleware is NOT an error handler
+app.use((err: Error, req: Request, res: Response) => {
+  // Express ignores this as an error handler
+  // because it has only 3 parameters!
+  res.status(500).json({ error: err.message });
+});
+
+// Bad: leaking stack trace in production
+app.use((err: Error, req: Request, res: Response, next: NextFunction) => {
+  res.status(500).json({
+    error: err.message,
+    stack: err.stack, // Never send this to clients!
+  });
+});
+
+// Bad: not calling next(err) in route
+app.get('/users/:id', async (req, res) => {
+  try {
+    const user = await getUser(req.params.id);
+    res.json(user);
+  } catch (err) {
+    res.status(500).json({ error: 'fail' }); // Should use next(err)
+  }
+});",error,express
+3,Fastify Error Handler,"fastify, setErrorHandler, error schema, fastify error","When building a Fastify API and you want to handle errors globally with proper schema validation on error responses","Use fastify.setErrorHandler to register a global handler; define error response schemas in your route config; leverage Fastify's built-in validation error formatting; use reply.status().send()","Throw errors without using Fastify's error conventions; forget to define error response schemas; use Express-style middleware patterns in Fastify","import Fastify, { FastifyError, FastifyReply, FastifyRequest } from 'fastify';
+import { AppError } from './errors';
+
+const app = Fastify({ logger: true });
+
+app.setErrorHandler((error: FastifyError, request: FastifyRequest, reply: FastifyReply) => {
+  request.log.error({ err: error }, 'Request error');
+
+  if (error instanceof AppError) {
+    return reply.status(error.statusCode).send({
+      status: 'error',
+      code: error.code,
+      message: error.message,
+    });
+  }
+
+  if (error.validation) {
+    return reply.status(400).send({
+      status: 'error',
+      code: 'VALIDATION_ERROR',
+      message: 'Invalid request',
+      details: error.validation,
+    });
+  }
+
+  return reply.status(500).send({
+    status: 'error',
+    code: 'INTERNAL_ERROR',
+    message: 'An unexpected error occurred',
+  });
+});
+
+// Route with error schema
+app.get('/users/:id', {
+  schema: {
+    response: {
+      404: {
+        type: 'object',
+        properties: {
+          status: { type: 'string' },
+          code: { type: 'string' },
+          message: { type: 'string' },
+        },
+      },
+    },
+  },
+  handler: async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const user = await findUser(id);
+    if (!user) throw new NotFoundError('User', id);
+    return user;
+  },
+});","// Bad: using Express-style error handling
+app.use((err, req, res, next) => {
+  // This is Express, not Fastify!
+  res.status(500).send(err.message);
+});
+
+// Bad: catching errors in every handler manually
+app.get('/users/:id', async (request, reply) => {
+  try {
+    const user = await findUser(request.params.id);
+    reply.send(user);
+  } catch (err) {
+    // Duplicate error handling in every route
+    reply.status(500).send({ error: err.message });
+  }
+});",error,fastify
+4,try/catch with async/await,"try catch, async await, error handling, promise, catch block","When calling async functions that might fail, such as database queries, HTTP calls, or file system operations","Wrap awaited calls in try/catch; re-throw or transform errors with additional context; use finally for cleanup; let errors propagate to centralized handlers when possible","Swallow errors silently in catch blocks; use .then().catch() chains mixed with async/await; catch errors just to re-throw them without adding value","import { PrismaClient } from '@prisma/client';
+import { AppError, NotFoundError } from './errors';
+
+const prisma = new PrismaClient();
+
+async function getUserOrders(userId: string) {
+  const user = await prisma.user.findUnique({ where: { id: userId } });
+  if (!user) {
+    throw new NotFoundError('User', userId);
+  }
+
+  try {
+    const orders = await prisma.order.findMany({
+      where: { userId },
+      include: { items: true },
+    });
+    return orders;
+  } catch (err) {
+    throw new AppError(
+      `Failed to fetch orders for user ${userId}`,
+      500,
+      'ORDER_FETCH_FAILED'
+    );
+  }
+}
+
+// Express route - let errors propagate
+const asyncHandler = (fn: Function) =>
+  (req: Request, res: Response, next: NextFunction) =>
+    Promise.resolve(fn(req, res, next)).catch(next);
+
+router.get('/users/:id/orders', asyncHandler(async (req: Request, res: Response) => {
+  const orders = await getUserOrders(req.params.id);
+  res.json({ data: orders });
+}));","// Bad: silently swallowing errors
+async function getUser(id: string) {
+  try {
+    return await prisma.user.findUnique({ where: { id } });
+  } catch (err) {
+    // Silent failure — caller has no idea it failed!
+    return null;
+  }
+}
+
+// Bad: pointless re-throw
+async function getData() {
+  try {
+    return await fetchData();
+  } catch (err) {
+    throw err; // This adds nothing, remove the try/catch
+  }
+}
+
+// Bad: mixing .then/.catch with async/await
+async function loadUser(id: string) {
+  const user = await prisma.user.findUnique({ where: { id } })
+    .then(u => u)
+    .catch(e => null); // Confusing mix of patterns
+  return user;
+}",error,
+5,Zod Validation Errors,"zod, validation, parse, safeParse, ZodError, format, flatten","When using Zod for request validation and you need to return user-friendly error messages from schema parsing failures","Use safeParse instead of parse to avoid throwing; use error.flatten() or error.format() for structured messages; map ZodIssue fields to your API error response shape","Call parse and let ZodError propagate uncaught; return raw Zod error objects to clients; ignore the path field which tells you which property failed","import { z } from 'zod';
+
+const CreateUserSchema = z.object({
+  email: z.string().email('Invalid email address'),
+  name: z.string().min(2, 'Name must be at least 2 characters'),
+  age: z.number().int().min(13, 'Must be at least 13 years old').optional(),
+  role: z.enum(['admin', 'user', 'moderator'], {
+    errorMap: () => ({ message: 'Role must be admin, user, or moderator' }),
+  }),
+});
+
+type CreateUserInput = z.infer<typeof CreateUserSchema>;
+
+function validateCreateUser(data: unknown): CreateUserInput {
+  const result = CreateUserSchema.safeParse(data);
+
+  if (!result.success) {
+    const fieldErrors = result.error.flatten().fieldErrors;
+    const messages = Object.entries(fieldErrors)
+      .map(([field, errors]) => `${field}: ${errors?.join(', ')}`)
+      .join('; ');
+
+    throw new AppError(messages, 400, 'VALIDATION_ERROR');
+  }
+
+  return result.data;
+}
+
+// Express middleware
+function validate<T>(schema: z.ZodSchema<T>) {
+  return (req: Request, _res: Response, next: NextFunction) => {
+    const result = schema.safeParse(req.body);
+    if (!result.success) {
+      const errors = result.error.issues.map((issue) => ({
+        field: issue.path.join('.'),
+        message: issue.message,
+      }));
+      throw new AppError('Validation failed', 400, 'VALIDATION_ERROR');
+    }
+    req.body = result.data;
+    next();
+  };
+}","// Bad: using parse which throws ZodError
+function validateUser(data: unknown) {
+  return CreateUserSchema.parse(data);
+  // ZodError thrown here is hard to handle
+}
+
+// Bad: returning raw Zod errors to client
+app.post('/users', (req, res) => {
+  const result = CreateUserSchema.safeParse(req.body);
+  if (!result.success) {
+    res.status(400).json(result.error); // Raw ZodError object!
+  }
+});
+
+// Bad: ignoring path information
+const errors = zodError.issues.map(i => i.message);
+// Loses which field caused each error",warning,zod
+6,Result Pattern,"result pattern, either, success, failure, no exceptions, discriminated union","When you want explicit error handling without relying on try/catch for control flow, especially in domain logic where errors are expected outcomes","Define a Result<T, E> discriminated union type with success and failure variants; use type narrowing to access values; compose results with map/flatMap helpers","Use Result everywhere including truly exceptional cases; make the Result type too complex; forget to handle the failure case","type Result<T, E = Error> =
+  | { success: true; data: T }
+  | { success: false; error: E };
+
+function ok<T>(data: T): Result<T, never> {
+  return { success: true, data };
+}
+
+function fail<E>(error: E): Result<never, E> {
+  return { success: false, error };
+}
+
+// Domain errors as a union
+type UserError =
+  | { code: 'EMAIL_TAKEN'; email: string }
+  | { code: 'INVALID_AGE'; age: number }
+  | { code: 'NOT_FOUND'; id: string };
+
+async function createUser(input: CreateUserInput): Promise<Result<User, UserError>> {
+  const existing = await prisma.user.findUnique({ where: { email: input.email } });
+  if (existing) {
+    return fail({ code: 'EMAIL_TAKEN', email: input.email });
+  }
+
+  if (input.age !== undefined && input.age < 13) {
+    return fail({ code: 'INVALID_AGE', age: input.age });
+  }
+
+  const user = await prisma.user.create({ data: input });
+  return ok(user);
+}
+
+// Usage with narrowing
+const result = await createUser(input);
+if (!result.success) {
+  switch (result.error.code) {
+    case 'EMAIL_TAKEN':
+      throw new ConflictError(`Email ${result.error.email} is already registered`);
+    case 'INVALID_AGE':
+      throw new AppError('User too young', 400, 'INVALID_AGE');
+    case 'NOT_FOUND':
+      throw new NotFoundError('User', result.error.id);
+  }
+}
+const user = result.data; // Type is User here","// Bad: overly complex Result with chaining that obscures logic
+const user = await createUser(input)
+  .then(r => r.map(u => u).flatMap(u => validate(u)).mapErr(e => e));
+// Hard to read — just use try/catch for this
+
+// Bad: not handling the failure branch
+const result = await createUser(input);
+const user = result.data; // TypeScript error: data might not exist!
+
+// Bad: using exceptions for expected outcomes
+async function createUser(input: CreateUserInput): Promise<User> {
+  const existing = await findByEmail(input.email);
+  if (existing) throw new Error('Email taken'); // Expected case, not exceptional
+  return prisma.user.create({ data: input });
+}",info,
+7,unhandledRejection Handler,"unhandledRejection, process.on, promise rejection, crash, graceful shutdown","At application startup to catch any unhandled promise rejections that would otherwise silently fail or crash the process","Register process.on('unhandledRejection') at the top of your entry point; log the error with full context; perform a graceful shutdown after logging; exit with a non-zero code","Ignore unhandled rejections; try to recover and keep running after an unhandled rejection; use this as a substitute for proper error handling","import { logger } from './logger';
+import { server } from './server';
+
+process.on('unhandledRejection', (reason: unknown, promise: Promise<unknown>) => {
+  logger.fatal({ err: reason, promise }, 'Unhandled promise rejection — shutting down');
+
+  // Attempt graceful shutdown
+  server.close(() => {
+    process.exit(1);
+  });
+
+  // Force exit if graceful shutdown takes too long
+  setTimeout(() => {
+    logger.fatal('Forced shutdown after timeout');
+    process.exit(1);
+  }, 10_000).unref();
+});
+
+// Ensure every async route handler has error forwarding
+const asyncHandler = (fn: Function) =>
+  (req: Request, res: Response, next: NextFunction) =>
+    Promise.resolve(fn(req, res, next)).catch(next);","// Bad: silently swallowing rejections
+process.on('unhandledRejection', () => {
+  // Ignoring the error entirely
+});
+
+// Bad: continuing to run after unhandled rejection
+process.on('unhandledRejection', (reason) => {
+  console.log('Oops:', reason);
+  // Process continues running in unknown state!
+});
+
+// Bad: not logging the error before exit
+process.on('unhandledRejection', () => {
+  process.exit(1); // No context for debugging
+});",critical,
+8,uncaughtException Handler,"uncaughtException, process.on, crash handler, fatal error","At application startup to handle truly unexpected exceptions that bypass all error handlers, ensuring the process exits cleanly","Register process.on('uncaughtException') at the entry point; log the error synchronously if possible; always exit the process afterward; clean up resources in a finally block","Try to recover from an uncaughtException; keep the process alive after one; use this as a normal error handling mechanism","import { logger } from './logger';
+import { server } from './server';
+import { prisma } from './db';
+
+process.on('uncaughtException', (err: Error) => {
+  // Log synchronously to ensure it's captured before exit
+  logger.fatal({ err }, 'Uncaught exception — process must exit');
+
+  // Attempt to close connections
+  Promise.allSettled([
+    prisma.$disconnect(),
+    new Promise<void>((resolve) => server.close(() => resolve())),
+  ]).finally(() => {
+    process.exit(1);
+  });
+
+  // Hard exit fallback
+  setTimeout(() => {
+    process.abort();
+  }, 5_000).unref();
+});
+
+// Also handle uncaughtExceptionMonitor for logging without interfering
+process.on('uncaughtExceptionMonitor', (err: Error, origin: string) => {
+  logger.fatal({ err, origin }, 'Exception monitor triggered');
+});","// Bad: trying to continue after uncaughtException
+process.on('uncaughtException', (err) => {
+  console.error(err);
+  // Process continues — state may be corrupted!
+});
+
+// Bad: no logging before exit
+process.on('uncaughtException', () => {
+  process.exit(1);
+});
+
+// Bad: using uncaughtException as normal error handling
+process.on('uncaughtException', (err) => {
+  if (err.message.includes('not found')) {
+    // This is NOT the place for business logic!
+    return;
+  }
+});",critical,
+9,HTTP Error Response Shape,"error response, API error, JSON error, error format, standardized","When designing your API's error response format to ensure consistency across all endpoints and make errors easy for clients to consume","Define a single ErrorResponse interface used by all error responses; include a machine-readable code; include a human-readable message; optionally include a details array for validation errors","Return inconsistent error shapes from different endpoints; include internal error details in production responses; use different field names for the same concept across endpoints","interface ErrorResponse {
+  status: 'error';
+  code: string;
+  message: string;
+  details?: ErrorDetail[];
+  requestId?: string;
+}
+
+interface ErrorDetail {
+  field: string;
+  message: string;
+  value?: unknown;
+}
+
+// Helper to create consistent responses
+function createErrorResponse(
+  code: string,
+  message: string,
+  details?: ErrorDetail[],
+  requestId?: string
+): ErrorResponse {
+  return {
+    status: 'error',
+    code,
+    message,
+    ...(details && { details }),
+    ...(requestId && { requestId }),
+  };
+}
+
+// Usage in error handler middleware
+export function errorHandler(err: Error, req: Request, res: Response, _next: NextFunction) {
+  const requestId = req.headers['x-request-id'] as string;
+
+  if (err instanceof AppError) {
+    res.status(err.statusCode).json(
+      createErrorResponse(err.code, err.message, undefined, requestId)
+    );
+    return;
+  }
+
+  res.status(500).json(
+    createErrorResponse('INTERNAL_ERROR', 'An unexpected error occurred', undefined, requestId)
+  );
+}","// Bad: inconsistent error shapes
+// Endpoint A:
+res.status(400).json({ error: 'Invalid email' });
+// Endpoint B:
+res.status(400).json({ message: 'Bad request', errors: ['Invalid'] });
+// Endpoint C:
+res.status(400).json({ success: false, msg: 'Validation failed' });
+
+// Bad: leaking internals
+res.status(500).json({
+  error: err.message,
+  stack: err.stack,
+  query: 'SELECT * FROM users WHERE...',
+});",warning,
+10,Domain Error Mapping,"domain error, error mapping, HTTP status, error translation, layer separation","When translating domain-layer errors to HTTP responses at the controller/route level to keep domain logic free of HTTP concerns","Create a mapper function or map object that converts domain error codes to HTTP status codes and messages; keep domain errors HTTP-agnostic; perform mapping at the boundary","Throw HTTP-specific errors from domain/service layers; scatter status code logic across the codebase; couple domain logic to a specific transport","// Domain errors — no HTTP knowledge
+type DomainError =
+  | { code: 'USER_NOT_FOUND'; userId: string }
+  | { code: 'EMAIL_ALREADY_EXISTS'; email: string }
+  | { code: 'INSUFFICIENT_BALANCE'; required: number; available: number }
+  | { code: 'ACCOUNT_LOCKED'; until: Date }
+  | { code: 'RATE_LIMITED'; retryAfter: number };
+
+// Mapping at the HTTP boundary
+const domainToHttp: Record<DomainError['code'], { status: number; message: string }> = {
+  USER_NOT_FOUND: { status: 404, message: 'User not found' },
+  EMAIL_ALREADY_EXISTS: { status: 409, message: 'Email already registered' },
+  INSUFFICIENT_BALANCE: { status: 422, message: 'Insufficient balance' },
+  ACCOUNT_LOCKED: { status: 423, message: 'Account is temporarily locked' },
+  RATE_LIMITED: { status: 429, message: 'Too many requests' },
+};
+
+function mapDomainErrorToResponse(error: DomainError): { status: number; body: ErrorResponse } {
+  const mapping = domainToHttp[error.code];
+  return {
+    status: mapping.status,
+    body: createErrorResponse(error.code, mapping.message),
+  };
+}
+
+// In route handler
+router.post('/transfer', asyncHandler(async (req, res) => {
+  const result = await transferService.execute(req.body);
+  if (!result.success) {
+    const { status, body } = mapDomainErrorToResponse(result.error);
+    return res.status(status).json(body);
+  }
+  res.status(200).json({ data: result.data });
+}));","// Bad: throwing HTTP errors from domain layer
+class TransferService {
+  async execute(input: TransferInput) {
+    if (balance < input.amount) {
+      throw new AppError('Insufficient balance', 422, 'BALANCE'); // HTTP in domain!
+    }
+  }
+}
+
+// Bad: scattering status code decisions
+// In service:
+if (!user) throw new Error('not found');
+// In route:
+catch (err) {
+  if (err.message === 'not found') res.status(404).json(...);
+  // Fragile string matching
+}",warning,
+11,Error Serialization,"error serialization, toJSON, structured logging, error object, JSON.stringify","When logging errors or sending them over the network where Error objects lose their properties during JSON.stringify since message and stack are non-enumerable","Implement a toJSON method or serializer function that captures message, stack, name, and custom properties; use a logging library like pino that handles Error serialization; create a utility to safely extract error info","Call JSON.stringify(error) directly which produces an empty object; log only error.message losing the stack trace; assume all error properties are enumerable","// Error serialization utility
+function serializeError(err: unknown): Record<string, unknown> {
+  if (err instanceof AppError) {
+    return {
+      name: err.name,
+      message: err.message,
+      code: err.code,
+      statusCode: err.statusCode,
+      isOperational: err.isOperational,
+      stack: err.stack,
+    };
+  }
+
+  if (err instanceof Error) {
+    return {
+      name: err.name,
+      message: err.message,
+      stack: err.stack,
+      ...(err as Record<string, unknown>),
+    };
+  }
+
+  return { message: String(err) };
+}
+
+// Custom error with toJSON
+export class AppError extends Error {
+  constructor(
+    message: string,
+    public readonly statusCode: number,
+    public readonly code: string,
+  ) {
+    super(message);
+    this.name = this.constructor.name;
+    Object.setPrototypeOf(this, new.target.prototype);
+  }
+
+  toJSON() {
+    return {
+      name: this.name,
+      message: this.message,
+      code: this.code,
+      statusCode: this.statusCode,
+      stack: this.stack,
+    };
+  }
+}
+
+// Pino handles Error serialization natively
+import pino from 'pino';
+const logger = pino({ serializers: { err: pino.stdSerializers.err } });
+logger.error({ err: new AppError('fail', 500, 'X') }, 'Operation failed');","// Bad: JSON.stringify drops message and stack
+const err = new Error('Something failed');
+console.log(JSON.stringify(err)); // Output: '{}'  — empty object!
+
+// Bad: logging only the message
+logger.error('Error: ' + err.message);
+// Lost: stack trace, error name, custom properties
+
+// Bad: using console.log for error objects
+console.log(err); // Output varies by environment, not structured",warning,pino
+12,Error Codes (enum),"error codes, enum, error constant, typed errors, machine-readable","When you need a finite set of machine-readable error codes that clients can programmatically switch on rather than parsing error message strings","Define error codes as a const object or string enum; use them in your custom error classes; include them in API responses; keep codes stable across versions","Use magic strings for error codes; change error codes without versioning; use numeric codes without documentation; expose internal error codes to clients","export const ErrorCode = {
+  // Auth
+  AUTH_INVALID_CREDENTIALS: 'AUTH_INVALID_CREDENTIALS',
+  AUTH_TOKEN_EXPIRED: 'AUTH_TOKEN_EXPIRED',
+  AUTH_INSUFFICIENT_PERMISSIONS: 'AUTH_INSUFFICIENT_PERMISSIONS',
+
+  // Validation
+  VALIDATION_FAILED: 'VALIDATION_FAILED',
+  VALIDATION_INVALID_EMAIL: 'VALIDATION_INVALID_EMAIL',
+
+  // Resource
+  RESOURCE_NOT_FOUND: 'RESOURCE_NOT_FOUND',
+  RESOURCE_ALREADY_EXISTS: 'RESOURCE_ALREADY_EXISTS',
+  RESOURCE_CONFLICT: 'RESOURCE_CONFLICT',
+
+  // Rate limiting
+  RATE_LIMIT_EXCEEDED: 'RATE_LIMIT_EXCEEDED',
+
+  // Internal
+  INTERNAL_ERROR: 'INTERNAL_ERROR',
+  SERVICE_UNAVAILABLE: 'SERVICE_UNAVAILABLE',
+} as const;
+
+export type ErrorCode = (typeof ErrorCode)[keyof typeof ErrorCode];
+
+// Usage with custom errors
+export class AppError extends Error {
+  constructor(
+    message: string,
+    public readonly statusCode: number,
+    public readonly code: ErrorCode,
+  ) {
+    super(message);
+    this.name = this.constructor.name;
+    Object.setPrototypeOf(this, new.target.prototype);
+  }
+}
+
+throw new AppError('Invalid credentials', 401, ErrorCode.AUTH_INVALID_CREDENTIALS);","// Bad: magic strings everywhere
+throw new AppError('fail', 400, 'val_error');
+// Elsewhere:
+throw new AppError('fail', 400, 'validation_error');
+// Which is correct? No consistency!
+
+// Bad: numeric codes without docs
+throw new AppError('fail', 400, 10042 as any);
+// What does 10042 mean? Nobody knows
+
+// Bad: unstable codes that break clients
+// v1: ErrorCode.USER_NOT_FOUND
+// v2: ErrorCode.NOT_FOUND  — client code breaks!",warning,
+13,Operational vs Programmer Errors,"operational error, programmer error, bug, expected error, crash, recovery","When deciding whether to gracefully handle an error or crash the process, since operational errors are expected failures while programmer errors are bugs","Classify errors as operational (expected, recoverable like invalid input or network timeout) or programmer (bugs like TypeError, null reference); recover from operational errors; crash on programmer errors","Try to recover from programmer errors since the process may be in an undefined state; treat all errors the same way; swallow programmer errors","export class AppError extends Error {
+  public readonly isOperational: boolean;
+
+  constructor(message: string, statusCode: number, code: string, isOperational = true) {
+    super(message);
+    this.isOperational = isOperational;
+    this.name = this.constructor.name;
+    Object.setPrototypeOf(this, new.target.prototype);
+  }
+}
+
+// Operational: expected, recoverable
+throw new AppError('Email already registered', 409, 'EMAIL_EXISTS', true);
+throw new AppError('Payment gateway timeout', 502, 'GATEWAY_TIMEOUT', true);
+
+// In the error handler
+export function errorHandler(err: Error, req: Request, res: Response, _next: NextFunction) {
+  if (err instanceof AppError && err.isOperational) {
+    // Operational: send error response, keep process running
+    logger.warn({ err }, 'Operational error');
+    res.status(err.statusCode).json({
+      status: 'error',
+      code: err.code,
+      message: err.message,
+    });
+    return;
+  }
+
+  // Programmer error: log and crash
+  logger.fatal({ err }, 'Programmer error — process must restart');
+  res.status(500).json({
+    status: 'error',
+    code: 'INTERNAL_ERROR',
+    message: 'Internal server error',
+  });
+
+  // Let process manager (pm2, k8s) restart us
+  process.exit(1);
+}","// Bad: treating programmer errors as operational
+try {
+  const value = (undefined as any).property; // TypeError — this is a bug!
+} catch (err) {
+  logger.warn('minor issue');
+  // Process continues in corrupted state
+}
+
+// Bad: treating all errors the same
+app.use((err, req, res, next) => {
+  res.status(500).json({ error: err.message });
+  // Should we restart? Log differently? Who knows!
+});
+
+// Bad: crashing on operational errors
+process.on('unhandledRejection', () => process.exit(1));
+// A 404 should NOT crash the process",error,
+14,AggregateError,"AggregateError, multiple errors, Promise.any, batch validation, error collection","When multiple operations can fail independently and you want to collect all errors rather than failing on the first one, such as batch validation or Promise.any rejections","Use AggregateError to bundle multiple errors together; iterate over the errors array to extract individual messages; use it with Promise.any; create custom aggregate errors for validation","Throw only the first error when multiple failures occur; concatenate error messages into a single string; ignore individual error context in aggregate errors","// Batch validation collecting all errors
+function validateBatch<T>(
+  items: T[],
+  validate: (item: T, index: number) => void
+): void {
+  const errors: Error[] = [];
+
+  items.forEach((item, index) => {
+    try {
+      validate(item, index);
+    } catch (err) {
+      errors.push(err instanceof Error ? err : new Error(String(err)));
+    }
+  });
+
+  if (errors.length > 0) {
+    throw new AggregateError(errors, `${errors.length} validation error(s)`);
+  }
+}
+
+// Usage
+try {
+  validateBatch(users, (user, i) => {
+    if (!user.email) throw new Error(`User at index ${i} missing email`);
+    if (!user.name) throw new Error(`User at index ${i} missing name`);
+  });
+} catch (err) {
+  if (err instanceof AggregateError) {
+    const details = err.errors.map((e: Error) => e.message);
+    throw new AppError(
+      `Batch validation failed: ${details.join('; ')}`,
+      400,
+      'BATCH_VALIDATION_ERROR'
+    );
+  }
+}
+
+// Promise.any returns AggregateError when all promises reject
+async function fetchFromMirrors(url: string): Promise<Response> {
+  const mirrors = ['https://mirror1.example.com', 'https://mirror2.example.com'];
+  try {
+    return await Promise.any(mirrors.map((m) => fetch(`${m}${url}`)));
+  } catch (err) {
+    if (err instanceof AggregateError) {
+      logger.error({ errors: err.errors }, 'All mirrors failed');
+    }
+    throw new AppError('All mirrors unavailable', 503, 'MIRRORS_UNAVAILABLE');
+  }
+}","// Bad: only reporting the first error
+function validateBatch(items: any[]) {
+  for (const item of items) {
+    if (!item.email) throw new Error('Missing email');
+    // Stops here — other errors never discovered!
+  }
+}
+
+// Bad: concatenating into a single string
+const allErrors = errors.map(e => e.message).join(', ');
+throw new Error(allErrors);
+// Loses stack traces, error types, and structure
+
+// Bad: ignoring AggregateError from Promise.any
+try {
+  await Promise.any(promises);
+} catch (err) {
+  throw new Error('All failed'); // Which ones? Why?
+}",info,
+15,Prisma Error Handling,"prisma, P2002, P2025, PrismaClientKnownRequestError, database error","When using Prisma ORM and you need to handle database-specific errors like unique constraint violations (P2002) or record not found (P2025)","Check for PrismaClientKnownRequestError and switch on the error code; extract metadata from the error's meta property; map Prisma errors to your domain errors at the repository layer","Let raw Prisma errors propagate to clients; check error messages with string matching instead of error codes; ignore the meta property which contains useful context","import { Prisma } from '@prisma/client';
+
+function handlePrismaError(err: unknown): never {
+  if (err instanceof Prisma.PrismaClientKnownRequestError) {
+    switch (err.code) {
+      case 'P2002': {
+        const fields = (err.meta?.target as string[]) ?? ['unknown'];
+        throw new ConflictError(
+          `Unique constraint violation on: ${fields.join(', ')}`
+        );
+      }
+      case 'P2025':
+        throw new NotFoundError(
+          (err.meta?.modelName as string) ?? 'Record',
+          'unknown'
+        );
+      case 'P2003': {
+        const field = err.meta?.field_name as string;
+        throw new AppError(
+          `Foreign key constraint failed on ${field}`,
+          400,
+          'FK_CONSTRAINT_FAILED'
+        );
+      }
+      case 'P2014':
+        throw new AppError(
+          'Required relation violation',
+          400,
+          'RELATION_VIOLATION'
+        );
+      default:
+        throw new AppError(
+          `Database error: ${err.code}`,
+          500,
+          'DATABASE_ERROR'
+        );
+    }
+  }
+
+  if (err instanceof Prisma.PrismaClientValidationError) {
+    throw new AppError('Invalid database query', 400, 'QUERY_VALIDATION');
+  }
+
+  throw err;
+}
+
+// Repository usage
+class UserRepository {
+  async create(data: CreateUserInput): Promise<User> {
+    try {
+      return await prisma.user.create({ data });
+    } catch (err) {
+      handlePrismaError(err);
+    }
+  }
+}","// Bad: string matching on error messages
+try {
+  await prisma.user.create({ data });
+} catch (err) {
+  if (err.message.includes('Unique constraint')) {
+    // Fragile — message format can change between versions!
+  }
+}
+
+// Bad: exposing raw Prisma errors to clients
+app.post('/users', async (req, res, next) => {
+  try {
+    const user = await prisma.user.create({ data: req.body });
+    res.json(user);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+    // Exposes: 'Unique constraint failed on the fields: (`email`)'
+  }
+});
+
+// Bad: ignoring error metadata
+catch (err) {
+  if (err.code === 'P2002') {
+    throw new Error('Duplicate'); // Which field? err.meta.target tells you!
+  }
+}",error,"@prisma/client"
+16,Not-Found Error Pattern,"not found, 404, resource missing, findOrFail, assertExists","When a requested resource does not exist in the database and you need to return a clear 404 response rather than null","Create a findOrFail helper or assertExists utility that throws a typed NotFoundError; use it consistently across all resource lookups; include the resource type and ID in the error message","Return null and let the caller forget to check; return 500 for missing resources; use generic error messages like 'Not found' without specifying what was not found","export class NotFoundError extends AppError {
+  constructor(resource: string, identifier: string) {
+    super(
+      `${resource} with identifier '${identifier}' was not found`,
+      404,
+      'RESOURCE_NOT_FOUND'
+    );
+  }
+}
+
+// Generic findOrFail helper
+async function findOrFail<T>(
+  queryFn: () => Promise<T | null>,
+  resource: string,
+  identifier: string
+): Promise<T> {
+  const result = await queryFn();
+  if (result === null) {
+    throw new NotFoundError(resource, identifier);
+  }
+  return result;
+}
+
+// Usage
+async function getUser(id: string): Promise<User> {
+  return findOrFail(
+    () => prisma.user.findUnique({ where: { id } }),
+    'User',
+    id
+  );
+}
+
+async function getUserByEmail(email: string): Promise<User> {
+  return findOrFail(
+    () => prisma.user.findUnique({ where: { email } }),
+    'User',
+    email
+  );
+}
+
+// In route
+router.get('/users/:id', asyncHandler(async (req, res) => {
+  const user = await getUser(req.params.id);
+  res.json({ data: user }); // No null check needed
+}));","// Bad: returning null and forgetting to check
+async function getUser(id: string) {
+  return prisma.user.findUnique({ where: { id } }); // Returns null
+}
+router.get('/users/:id', async (req, res) => {
+  const user = await getUser(req.params.id);
+  res.json(user); // Sends null with 200 status!
+});
+
+// Bad: generic error messages
+if (!user) throw new Error('Not found');
+// What was not found? Which ID? No context.
+
+// Bad: 500 instead of 404
+if (!user) throw new Error('User lookup failed');
+// Returns 500 — misleading for a missing resource",warning,
+17,Validation Error Formatting,"validation error, user-friendly, field errors, error messages, form errors","When validation fails and you need to return structured error messages that frontend applications can map to specific form fields","Return errors as an array of objects with field and message properties; use Zod's flatten or format methods; keep messages user-friendly and translatable; group errors by field","Return a single concatenated error string; use technical jargon in user-facing messages; return error arrays without field association; mix error formats between endpoints","interface ValidationError {
+  field: string;
+  message: string;
+  code: string;
+}
+
+interface ValidationErrorResponse extends ErrorResponse {
+  code: 'VALIDATION_ERROR';
+  details: ValidationError[];
+}
+
+// From Zod errors
+function formatZodError(error: z.ZodError): ValidationError[] {
+  return error.issues.map((issue) => ({
+    field: issue.path.join('.'),
+    message: issue.message,
+    code: issue.code,
+  }));
+}
+
+// Validation middleware
+function validate<T>(schema: z.ZodSchema<T>) {
+  return (req: Request, res: Response, next: NextFunction) => {
+    const result = schema.safeParse(req.body);
+    if (!result.success) {
+      const response: ValidationErrorResponse = {
+        status: 'error',
+        code: 'VALIDATION_ERROR',
+        message: 'Validation failed',
+        details: formatZodError(result.error),
+      };
+      res.status(400).json(response);
+      return;
+    }
+    req.body = result.data;
+    next();
+  };
+}
+
+// Response example:
+// {
+//   ""status"": ""error"",
+//   ""code"": ""VALIDATION_ERROR"",
+//   ""message"": ""Validation failed"",
+//   ""details"": [
+//     { ""field"": ""email"", ""message"": ""Invalid email address"", ""code"": ""invalid_string"" },
+//     { ""field"": ""age"", ""message"": ""Must be at least 13"", ""code"": ""too_small"" }
+//   ]
+// }","// Bad: single concatenated string
+res.status(400).json({
+  error: 'Email is invalid, Name is required, Age must be positive',
+});
+// Frontend cannot map errors to specific fields
+
+// Bad: technical error messages
+res.status(400).json({
+  errors: ['Expected string, received number at $.age'],
+  // Users don't understand JSON path notation
+});
+
+// Bad: errors without field names
+res.status(400).json({
+  errors: ['Invalid email', 'Name too short'],
+  // Which field is 'Invalid email' for?
+});",warning,zod
+18,Retry with Error Classification,"retry, retryable, transient error, backoff, exponential backoff, circuit breaker","When calling external services that may fail due to transient issues like network timeouts or rate limiting, and you want to automatically retry only errors that are likely to succeed on retry","Classify errors as retryable (network timeout, 429, 503) or fatal (400, 401, 404); implement exponential backoff with jitter; set a maximum retry count; log each retry attempt","Retry all errors including client errors (4xx); retry without backoff which can overwhelm the service; retry indefinitely; retry non-idempotent operations blindly","interface RetryOptions {
+  maxRetries: number;
+  baseDelayMs: number;
+  maxDelayMs: number;
+}
+
+function isRetryable(err: unknown): boolean {
+  if (err instanceof AppError) {
+    return [502, 503, 504, 429].includes(err.statusCode);
+  }
+  if (err instanceof Error) {
+    return ['ECONNRESET', 'ETIMEDOUT', 'ECONNREFUSED'].some(
+      (code) => err.message.includes(code)
+    );
+  }
+  return false;
+}
+
+async function withRetry<T>(
+  fn: () => Promise<T>,
+  options: RetryOptions = { maxRetries: 3, baseDelayMs: 200, maxDelayMs: 5000 }
+): Promise<T> {
+  let lastError: unknown;
+
+  for (let attempt = 0; attempt <= options.maxRetries; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastError = err;
+
+      if (attempt === options.maxRetries || !isRetryable(err)) {
+        throw err;
+      }
+
+      const delay = Math.min(
+        options.baseDelayMs * Math.pow(2, attempt) + Math.random() * 100,
+        options.maxDelayMs
+      );
+
+      logger.warn(
+        { err, attempt: attempt + 1, nextRetryMs: delay },
+        'Retrying after transient error'
+      );
+
+      await new Promise((resolve) => setTimeout(resolve, delay));
+    }
+  }
+
+  throw lastError;
+}
+
+// Usage
+const data = await withRetry(() => externalApi.fetchData(id), {
+  maxRetries: 3,
+  baseDelayMs: 500,
+  maxDelayMs: 10_000,
+});","// Bad: retrying all errors
+async function fetchWithRetry(url: string) {
+  for (let i = 0; i < 3; i++) {
+    try {
+      return await fetch(url);
+    } catch {
+      await sleep(1000); // Retrying 400 Bad Request won't help!
+    }
+  }
+}
+
+// Bad: no backoff
+for (let i = 0; i < 10; i++) {
+  try { return await callApi(); } catch { /* immediate retry */ }
+  // Hammering the server 10 times instantly
+}
+
+// Bad: infinite retries
+while (true) {
+  try { return await callApi(); } catch { await sleep(100); }
+  // Never gives up — resource exhaustion risk
+}",warning,
+19,React Error Boundaries,"error boundary, componentDidCatch, getDerivedStateFromError, React, fallback UI","When building React applications and you need to catch rendering errors in component trees to show fallback UI instead of a blank screen","Create class components that implement getDerivedStateFromError and componentDidCatch; wrap logical sections of your app with different boundaries; provide meaningful fallback UIs; log errors to a service","Use error boundaries for event handler errors (they only catch render errors); wrap every single component in a boundary; show a blank fallback; forget to provide a way to recover","import React, { Component, ReactNode } from 'react';
+
+interface ErrorBoundaryProps {
+  children: ReactNode;
+  fallback?: ReactNode;
+  onError?: (error: Error, errorInfo: React.ErrorInfo) => void;
+}
+
+interface ErrorBoundaryState {
+  hasError: boolean;
+  error: Error | null;
+}
+
+export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundaryState> {
+  constructor(props: ErrorBoundaryProps) {
+    super(props);
+    this.state = { hasError: false, error: null };
+  }
+
+  static getDerivedStateFromError(error: Error): ErrorBoundaryState {
+    return { hasError: true, error };
+  }
+
+  componentDidCatch(error: Error, errorInfo: React.ErrorInfo): void {
+    this.props.onError?.(error, errorInfo);
+    console.error('Error boundary caught:', error, errorInfo);
+  }
+
+  render(): ReactNode {
+    if (this.state.hasError) {
+      return this.props.fallback ?? (
+        <div role=""alert"">
+          <h2>Something went wrong</h2>
+          <button onClick={() => this.setState({ hasError: false, error: null })}>
+            Try again
+          </button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
+// Usage
+function App() {
+  return (
+    <ErrorBoundary fallback={<p>Dashboard failed to load</p>}>
+      <Dashboard />
+    </ErrorBoundary>
+  );
+}","// Bad: error boundary for event handlers (does not work)
+// Error boundaries do NOT catch errors in event handlers
+<ErrorBoundary>
+  <button onClick={() => { throw new Error('click'); }}>
+    Click
+  </button>
+</ErrorBoundary>
+// This error will NOT be caught by the boundary!
+
+// Bad: blank fallback
+<ErrorBoundary fallback={<></>}>
+  <Dashboard />
+</ErrorBoundary>
+// User sees nothing — worse than showing the error
+
+// Bad: no recovery mechanism
+static getDerivedStateFromError() {
+  return { hasError: true };
+  // No way for user to retry or recover
+}",warning,react
+20,NestJS ExceptionFilter,"nestjs, exception filter, global filter, HttpException, catch decorator","When building a NestJS application and you need to handle exceptions globally or per-controller with structured error responses","Create a class implementing ExceptionFilter decorated with @Catch; register it globally with app.useGlobalFilters or per-controller; handle both HttpException and unknown errors; use the ArgumentsHost to access the response object","Mix Express error handling with NestJS filters; throw plain errors instead of HttpException subclasses; forget to register the filter; handle errors in every controller method manually","import {
+  ExceptionFilter,
+  Catch,
+  ArgumentsHost,
+  HttpException,
+  HttpStatus,
+  Logger,
+} from '@nestjs/common';
+import { Request, Response } from 'express';
+
+@Catch()
+export class GlobalExceptionFilter implements ExceptionFilter {
+  private readonly logger = new Logger(GlobalExceptionFilter.name);
+
+  catch(exception: unknown, host: ArgumentsHost): void {
+    const ctx = host.switchToHttp();
+    const response = ctx.getResponse<Response>();
+    const request = ctx.getRequest<Request>();
+
+    let status = HttpStatus.INTERNAL_SERVER_ERROR;
+    let message = 'Internal server error';
+    let code = 'INTERNAL_ERROR';
+
+    if (exception instanceof HttpException) {
+      status = exception.getStatus();
+      const exceptionResponse = exception.getResponse();
+      message = typeof exceptionResponse === 'string'
+        ? exceptionResponse
+        : (exceptionResponse as any).message ?? message;
+      code = (exceptionResponse as any).code ?? `HTTP_${status}`;
+    }
+
+    this.logger.error(
+      { err: exception, path: request.url, method: request.method },
+      'Exception caught',
+    );
+
+    response.status(status).json({
+      status: 'error',
+      code,
+      message,
+      path: request.url,
+      timestamp: new Date().toISOString(),
+    });
+  }
+}
+
+// Registration in main.ts
+async function bootstrap() {
+  const app = await NestFactory.create(AppModule);
+  app.useGlobalFilters(new GlobalExceptionFilter());
+  await app.listen(3000);
+}","// Bad: mixing Express middleware with NestJS
+app.use((err, req, res, next) => {
+  // NestJS has its own mechanism — use ExceptionFilter!
+  res.status(500).json({ error: err.message });
+});
+
+// Bad: catching in every controller method
+@Controller('users')
+class UserController {
+  @Get(':id')
+  async getUser(@Param('id') id: string) {
+    try {
+      return await this.userService.findById(id);
+    } catch (err) {
+      // Duplicated in every method — use a filter!
+      throw new HttpException('Not found', 404);
+    }
+  }
+}
+
+// Bad: throwing plain errors
+throw new Error('Not found');
+// NestJS ExceptionFilter won't properly handle this",warning,@nestjs/common
+21,Logging Errors with Context,"pino, structured logging, error context, request id, error logging","When logging errors and you need to include sufficient context for debugging, such as the request ID, user ID, operation name, and error metadata","Use a structured logger like pino; pass error as the err serializer key; include request context (id, path, method); add operation-specific metadata; use appropriate log levels (warn for operational, error/fatal for unexpected)","Use console.log or console.error for production logging; log only the error message without context; log sensitive data like passwords or tokens; use string interpolation instead of structured fields","import pino from 'pino';
+
+const logger = pino({
+  level: process.env.LOG_LEVEL ?? 'info',
+  serializers: {
+    err: pino.stdSerializers.err,
+    req: pino.stdSerializers.req,
+    res: pino.stdSerializers.res,
+  },
+});
+
+// Create child logger with request context
+function createRequestLogger(req: Request) {
+  return logger.child({
+    requestId: req.headers['x-request-id'],
+    method: req.method,
+    path: req.path,
+    userId: (req as any).user?.id,
+  });
+}
+
+// In error handler
+export function errorHandler(err: Error, req: Request, res: Response, _next: NextFunction) {
+  const log = createRequestLogger(req);
+
+  if (err instanceof AppError && err.isOperational) {
+    log.warn(
+      { err, statusCode: err.statusCode, errorCode: err.code },
+      'Operational error'
+    );
+  } else {
+    log.error(
+      { err },
+      'Unexpected error'
+    );
+  }
+
+  res.status(err instanceof AppError ? err.statusCode : 500).json({
+    status: 'error',
+    code: err instanceof AppError ? err.code : 'INTERNAL_ERROR',
+    message: err instanceof AppError ? err.message : 'An unexpected error occurred',
+  });
+}
+
+// Service-level logging
+async function processPayment(orderId: string, amount: number) {
+  const log = logger.child({ operation: 'processPayment', orderId, amount });
+  log.info('Starting payment processing');
+
+  try {
+    const result = await paymentGateway.charge(amount);
+    log.info({ transactionId: result.id }, 'Payment processed successfully');
+    return result;
+  } catch (err) {
+    log.error({ err }, 'Payment processing failed');
+    throw err;
+  }
+}","// Bad: console.log in production
+console.log('Error:', err.message);
+// No structure, no level, no context, not machine-parseable
+
+// Bad: logging only the message
+logger.error(err.message);
+// Lost: stack trace, error type, custom properties
+
+// Bad: string interpolation
+logger.error(`Error in ${req.path}: ${err.message} for user ${userId}`);
+// Not searchable, not filterable, not structured
+
+// Bad: logging sensitive data
+logger.error({
+  err,
+  password: req.body.password,
+  token: req.headers.authorization,
+}, 'Auth failed');
+// Credentials in your logs!",error,pino
+22,RFC 7807 Problem Details,"RFC 7807, problem details, application/problem+json, standard error, HTTP API error","When building a public or standards-compliant HTTP API and you want to use the RFC 7807 Problem Details format for error responses","Set Content-Type to application/problem+json; include type (URI reference), title (short summary), status (HTTP code), detail (human-readable explanation), and instance (occurrence URI); extend with custom fields as needed","Deviate from the RFC field names; forget the Content-Type header; use type as a plain string instead of a URI; omit the status field","interface ProblemDetail {
+  type: string;
+  title: string;
+  status: number;
+  detail: string;
+  instance?: string;
+  [key: string]: unknown; // Extension fields
+}
+
+function createProblemDetail(
+  type: string,
+  title: string,
+  status: number,
+  detail: string,
+  extensions?: Record<string, unknown>
+): ProblemDetail {
+  return {
+    type: `https://api.example.com/problems/${type}`,
+    title,
+    status,
+    detail,
+    instance: `/errors/${crypto.randomUUID()}`,
+    ...extensions,
+  };
+}
+
+// Express error handler using RFC 7807
+export function problemDetailsHandler(
+  err: Error,
+  req: Request,
+  res: Response,
+  _next: NextFunction
+) {
+  let problem: ProblemDetail;
+
+  if (err instanceof NotFoundError) {
+    problem = createProblemDetail(
+      'resource-not-found',
+      'Resource Not Found',
+      404,
+      err.message
+    );
+  } else if (err instanceof ConflictError) {
+    problem = createProblemDetail(
+      'conflict',
+      'Resource Conflict',
+      409,
+      err.message
+    );
+  } else {
+    problem = createProblemDetail(
+      'internal-error',
+      'Internal Server Error',
+      500,
+      'An unexpected error occurred'
+    );
+  }
+
+  res
+    .status(problem.status)
+    .header('Content-Type', 'application/problem+json')
+    .json(problem);
+}
+
+// Response example:
+// {
+//   ""type"": ""https://api.example.com/problems/resource-not-found"",
+//   ""title"": ""Resource Not Found"",
+//   ""status"": 404,
+//   ""detail"": ""User with identifier '123' was not found"",
+//   ""instance"": ""/errors/a1b2c3d4-...""
+// }","// Bad: wrong content type
+res.header('Content-Type', 'application/json'); // Should be application/problem+json
+
+// Bad: non-standard field names
+res.json({
+  error_type: 'not_found',   // Should be 'type'
+  error_message: 'Not found', // Should be 'detail'
+  code: 404,                  // Should be 'status'
+});
+
+// Bad: type is not a URI
+res.json({
+  type: 'not_found', // Should be a URI like https://api.example.com/problems/not-found
+  title: 'Not Found',
+  status: 404,
+});",info,

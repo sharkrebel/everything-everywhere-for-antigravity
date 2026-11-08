@@ -1,0 +1,1701 @@
+No,Category,Guideline,Description,Do,Dont,Code Good,Code Bad,Severity,Docs URL
+1,Schema Definition,"Define schema with gql tag and SDL","Use GraphQL Schema Definition Language (SDL) with the gql tagged template literal. Define types, queries, and mutations clearly with descriptions and proper nullability.","Use gql tag for type definitions; add descriptions to types and fields; be explicit about nullability","Do not define schemas as raw strings; do not make everything nullable by default; do not skip field descriptions","import { gql } from 'graphql-tag';
+
+export const typeDefs = gql`
+  """"""
+  A registered user in the system.
+  """"""
+  type User {
+    id: ID!
+    email: String!
+    name: String!
+    avatar: String
+    role: UserRole!
+    posts(first: Int = 10, after: String): PostConnection!
+    createdAt: DateTime!
+  }
+
+  enum UserRole {
+    ADMIN
+    EDITOR
+    VIEWER
+  }
+
+  type Query {
+    """"""
+    Get the currently authenticated user.
+    """"""
+    me: User
+
+    """"""
+    Find a user by their ID.
+    """"""
+    user(id: ID!): User
+
+    """"""
+    List all users with pagination.
+    """"""
+    users(first: Int = 20, after: String): UserConnection!
+  }
+
+  type Mutation {
+    updateProfile(input: UpdateProfileInput!): User!
+    deleteAccount: Boolean!
+  }
+`;","// BAD: Schema as raw string, no descriptions, everything nullable
+const typeDefs = `
+  type User {
+    id: ID
+    email: String
+    name: String
+    role: String
+  }
+
+  type Query {
+    me: User
+    user(id: String): User
+    users: [User]
+  }
+`;
+// No descriptions, nullable IDs, String instead of enum, no pagination",error,https://graphql.org/learn/schema/
+2,Resolver Setup,"Organize resolvers by type with Query, Mutation, and field resolvers","Structure resolvers as an object matching the schema types. Separate Query, Mutation, and field resolvers. Keep resolver functions thin by delegating to service layers.","Separate resolvers by type; delegate business logic to service layers; keep resolvers thin","Do not put all logic in resolvers; do not mix database queries directly in resolver functions","import type { Resolvers } from './generated/graphql';
+import { UserService } from './services/user.service';
+import { PostService } from './services/post.service';
+
+export const resolvers: Resolvers = {
+  Query: {
+    me: (_parent, _args, context) => {
+      if (!context.user) return null;
+      return UserService.findById(context.user.id);
+    },
+    user: (_parent, { id }, context) => {
+      return UserService.findById(id);
+    },
+    users: (_parent, { first, after }, context) => {
+      return UserService.findMany({ first, after });
+    },
+  },
+
+  Mutation: {
+    updateProfile: async (_parent, { input }, context) => {
+      if (!context.user) throw new AuthenticationError('Not authenticated');
+      return UserService.updateProfile(context.user.id, input);
+    },
+  },
+
+  User: {
+    posts: (parent, { first, after }) => {
+      return PostService.findByAuthor(parent.id, { first, after });
+    },
+  },
+};","// BAD: All logic crammed into resolvers, no service layer
+const resolvers = {
+  Query: {
+    users: async (_: any, args: any) => {
+      // Database logic directly in resolver
+      const users = await prisma.user.findMany({
+        take: args.first || 20,
+        skip: args.offset || 0,
+        include: { posts: true, comments: true }, // Over-fetching!
+      });
+      // Business logic mixed in
+      return users.map(u => ({
+        ...u,
+        name: u.firstName + ' ' + u.lastName,
+        isActive: u.lastLogin > Date.now() - 86400000,
+      }));
+    },
+  },
+};",error,https://graphql.org/learn/execution/
+3,Apollo Server Setup,"Configure ApolloServer with proper plugins and error handling","Set up ApolloServer with type-safe resolvers, proper plugins for logging and shutdown, and production-ready configuration including introspection control.","Use ApolloServer with plugins for logging and graceful shutdown; disable introspection in production","Do not use ApolloServer without plugins; do not enable introspection in production; do not skip graceful shutdown","import { ApolloServer } from '@apollo/server';
+import { expressMiddleware } from '@apollo/server/express4';
+import { ApolloServerPluginDrainHttpServer } from '@apollo/server/plugin/drainHttpServer';
+import { ApolloServerPluginLandingPageDisabled } from '@apollo/server/plugin/disabled';
+import express from 'express';
+import http from 'http';
+import cors from 'cors';
+import { typeDefs } from './schema';
+import { resolvers } from './resolvers';
+import { createContext } from './context';
+
+const app = express();
+const httpServer = http.createServer(app);
+
+const server = new ApolloServer({
+  typeDefs,
+  resolvers,
+  plugins: [
+    ApolloServerPluginDrainHttpServer({ httpServer }),
+    ...(process.env.NODE_ENV === 'production'
+      ? [ApolloServerPluginLandingPageDisabled()]
+      : []),
+  ],
+  introspection: process.env.NODE_ENV !== 'production',
+  formatError: (formattedError, error) => {
+    console.error('GraphQL Error:', error);
+    if (process.env.NODE_ENV === 'production') {
+      return { message: formattedError.message, extensions: { code: formattedError.extensions?.code } };
+    }
+    return formattedError;
+  },
+});
+
+await server.start();
+
+app.use(
+  '/graphql',
+  cors<cors.CorsRequest>(),
+  express.json(),
+  expressMiddleware(server, {
+    context: createContext,
+  })
+);
+
+await new Promise<void>((resolve) => httpServer.listen({ port: 4000 }, resolve));
+console.log('Server ready at http://localhost:4000/graphql');","// BAD: Minimal setup with no plugins or production config
+import { ApolloServer } from '@apollo/server';
+import { startStandaloneServer } from '@apollo/server/standalone';
+
+const server = new ApolloServer({
+  typeDefs,
+  resolvers,
+  // No plugins, no error formatting, introspection always on
+});
+
+const { url } = await startStandaloneServer(server);
+// No graceful shutdown, no CORS config, no context",error,https://www.apollographql.com/docs/apollo-server/
+4,GraphQL Yoga Setup,"Configure GraphQL Yoga with proper plugins and envelop integration","GraphQL Yoga is a batteries-included GraphQL server. Use createYoga() with envelop plugins for auth, validation, and other cross-cutting concerns.","Use createYoga with envelop plugins; configure proper CORS and error masking; use schema from SDL or code-first","Do not use Yoga without error masking in production; do not skip plugin integration for cross-cutting concerns","import { createYoga, createSchema } from 'graphql-yoga';
+import { useGenericAuth } from '@envelop/generic-auth';
+import { useRateLimiter } from '@envelop/rate-limiter';
+import { createServer } from 'http';
+import { typeDefs } from './schema';
+import { resolvers } from './resolvers';
+import { authenticateUser } from './auth';
+
+const yoga = createYoga({
+  schema: createSchema({ typeDefs, resolvers }),
+  maskedErrors: process.env.NODE_ENV === 'production',
+  logging: true,
+  cors: {
+    origin: process.env.ALLOWED_ORIGINS?.split(',') || ['http://localhost:3000'],
+    credentials: true,
+    methods: ['POST'],
+  },
+  plugins: [
+    useGenericAuth({
+      resolveUserFn: async (context) => {
+        const token = context.request.headers.get('authorization')?.replace('Bearer ', '');
+        if (!token) return null;
+        return authenticateUser(token);
+      },
+      mode: 'resolve-only',
+    }),
+    useRateLimiter({
+      identifyFn: (context) => context.currentUser?.id || context.request.headers.get('x-forwarded-for') || 'anonymous',
+    }),
+  ],
+  context: async ({ request }) => {
+    return { db: prisma };
+  },
+});
+
+const server = createServer(yoga);
+server.listen(4000, () => {
+  console.log('GraphQL Yoga running at http://localhost:4000/graphql');
+});","// BAD: Bare yoga setup with no security
+import { createYoga, createSchema } from 'graphql-yoga';
+import { createServer } from 'http';
+
+const yoga = createYoga({
+  schema: createSchema({ typeDefs, resolvers }),
+  // No error masking -- stack traces exposed!
+  // No CORS -- open to any origin
+  // No auth plugin
+  // No rate limiting
+});
+
+const server = createServer(yoga);
+server.listen(4000);",error,https://the-guild.dev/graphql/yoga-server/docs
+5,Context,"Pass authentication and database connections through context","The context function runs on every request and provides shared resources to all resolvers. Use it to pass the authenticated user, database connections, and data loaders.","Create a typed context with user, db, and loaders; authenticate in the context function; type the context","Do not access request headers in individual resolvers; do not create new db connections per resolver","// src/context.ts
+import type { Request } from 'express';
+import { PrismaClient } from '@prisma/client';
+import { verifyToken } from './auth';
+import { createLoaders } from './dataloaders';
+
+const prisma = new PrismaClient();
+
+export interface GraphQLContext {
+  db: PrismaClient;
+  user: { id: string; email: string; role: string } | null;
+  loaders: ReturnType<typeof createLoaders>;
+}
+
+export async function createContext({ req }: { req: Request }): Promise<GraphQLContext> {
+  let user: GraphQLContext['user'] = null;
+
+  const token = req.headers.authorization?.replace('Bearer ', '');
+  if (token) {
+    try {
+      const payload = await verifyToken(token);
+      user = await prisma.user.findUnique({
+        where: { id: payload.sub },
+        select: { id: true, email: true, role: true },
+      });
+    } catch {
+      // Invalid token -- user stays null
+    }
+  }
+
+  return {
+    db: prisma,
+    user,
+    loaders: createLoaders(prisma),
+  };
+}","// BAD: No typed context, db created per request
+const resolvers = {
+  Query: {
+    me: async (_: any, __: any, context: any) => {
+      // Accessing headers in resolver instead of context
+      const token = context.req.headers.authorization;
+      const user = jwt.verify(token, SECRET);
+      // Creating new db connection per resolver!
+      const db = new PrismaClient();
+      const result = await db.user.findUnique({ where: { id: user.id } });
+      await db.$disconnect();
+      return result;
+    },
+  },
+};",error,https://www.apollographql.com/docs/apollo-server/data/context/
+6,Input Types,"Use GraphQL input types for mutation arguments","Define dedicated input types for mutations instead of passing individual scalar arguments. This improves readability, type safety, and makes it easier to add optional fields.","Define input types for mutations; group related fields; make required fields non-nullable with !","Do not pass many individual arguments to mutations; do not reuse output types as input","// Schema definition
+const typeDefs = gql`
+  input CreatePostInput {
+    title: String!
+    content: String!
+    tags: [String!]
+    published: Boolean = false
+    categoryId: ID!
+  }
+
+  input UpdatePostInput {
+    title: String
+    content: String
+    tags: [String!]
+    published: Boolean
+    categoryId: ID
+  }
+
+  type Mutation {
+    createPost(input: CreatePostInput!): Post!
+    updatePost(id: ID!, input: UpdatePostInput!): Post!
+  }
+`;
+
+// Resolver implementation
+const resolvers = {
+  Mutation: {
+    createPost: async (_parent: unknown, { input }: { input: CreatePostInput }, context: GraphQLContext) => {
+      if (!context.user) throw new GraphQLError('Not authenticated');
+      return context.db.post.create({
+        data: {
+          ...input,
+          authorId: context.user.id,
+        },
+      });
+    },
+    updatePost: async (_parent: unknown, { id, input }: { id: string; input: UpdatePostInput }, context: GraphQLContext) => {
+      if (!context.user) throw new GraphQLError('Not authenticated');
+      return context.db.post.update({
+        where: { id, authorId: context.user.id },
+        data: input,
+      });
+    },
+  },
+};","// BAD: Too many individual arguments instead of input type
+const typeDefs = gql`
+  type Mutation {
+    createPost(
+      title: String!
+      content: String!
+      tag1: String
+      tag2: String
+      tag3: String
+      published: Boolean
+      categoryId: ID!
+    ): Post!
+  }
+`;
+// Hard to extend, messy resolver signature, no grouping",warning,https://graphql.org/learn/schema/#input-types
+7,Custom Scalars,"Implement custom scalars for DateTime, JSON, and domain-specific types","Custom scalars handle serialization, parsing, and validation for types beyond the built-in String, Int, Float, Boolean, and ID. Use well-tested libraries for common scalars.","Use graphql-scalars for common types like DateTime and JSON; implement custom scalars for domain-specific types","Do not represent dates as strings; do not skip validation in custom scalar parsers","import { DateTimeResolver, JSONResolver, EmailAddressResolver } from 'graphql-scalars';
+import { gql } from 'graphql-tag';
+
+export const typeDefs = gql`
+  scalar DateTime
+  scalar JSON
+  scalar EmailAddress
+
+  type User {
+    id: ID!
+    email: EmailAddress!
+    metadata: JSON
+    createdAt: DateTime!
+    updatedAt: DateTime!
+  }
+
+  type Query {
+    user(id: ID!): User
+  }
+
+  input CreateUserInput {
+    email: EmailAddress!
+    name: String!
+    metadata: JSON
+  }
+`;
+
+export const resolvers = {
+  DateTime: DateTimeResolver,
+  JSON: JSONResolver,
+  EmailAddress: EmailAddressResolver,
+  Query: {
+    user: (_parent: unknown, { id }: { id: string }, context: GraphQLContext) => {
+      return context.db.user.findUnique({ where: { id } });
+    },
+  },
+};","// BAD: Using String for dates, no email validation
+const typeDefs = gql`
+  type User {
+    id: ID!
+    email: String!         # No email validation
+    metadata: String       # JSON stored as string
+    createdAt: String!     # Date as unformatted string
+  }
+`;
+
+// Client receives: { createdAt: ""2024-01-15T10:30:00.000Z"" }
+// but could also receive: { createdAt: ""Jan 15 2024"" }
+// No consistency guarantees",warning,https://the-guild.dev/graphql/scalars
+8,DataLoader,"Use DataLoader to prevent N+1 query problems","DataLoader batches and caches database lookups within a single request. Create per-request DataLoader instances to avoid stale data across requests while solving the N+1 problem.","Create DataLoaders per request in context; batch by primary key; use caching within a single request","Do not create global DataLoaders that share cache across requests; do not query inside loops in resolvers","import DataLoader from 'dataloader';
+import type { PrismaClient, User, Post } from '@prisma/client';
+
+export function createLoaders(db: PrismaClient) {
+  return {
+    userLoader: new DataLoader<string, User | null>(async (ids) => {
+      const users = await db.user.findMany({
+        where: { id: { in: [...ids] } },
+      });
+      const userMap = new Map(users.map((u) => [u.id, u]));
+      return ids.map((id) => userMap.get(id) ?? null);
+    }),
+
+    postsByAuthorLoader: new DataLoader<string, Post[]>(async (authorIds) => {
+      const posts = await db.post.findMany({
+        where: { authorId: { in: [...authorIds] } },
+      });
+      const postMap = new Map<string, Post[]>();
+      posts.forEach((post) => {
+        const existing = postMap.get(post.authorId) ?? [];
+        existing.push(post);
+        postMap.set(post.authorId, existing);
+      });
+      return authorIds.map((id) => postMap.get(id) ?? []);
+    }),
+  };
+}
+
+// In resolvers:
+const resolvers = {
+  Post: {
+    author: (parent: Post, _args: unknown, context: GraphQLContext) => {
+      return context.loaders.userLoader.load(parent.authorId);
+    },
+  },
+  User: {
+    posts: (parent: User, _args: unknown, context: GraphQLContext) => {
+      return context.loaders.postsByAuthorLoader.load(parent.id);
+    },
+  },
+};","// BAD: N+1 queries without DataLoader
+const resolvers = {
+  Post: {
+    // This runs once PER post -- if you fetch 50 posts, this makes 50 queries!
+    author: async (parent: any) => {
+      return prisma.user.findUnique({ where: { id: parent.authorId } });
+    },
+  },
+  User: {
+    // Same N+1 problem
+    posts: async (parent: any) => {
+      return prisma.post.findMany({ where: { authorId: parent.id } });
+    },
+  },
+};",error,https://github.com/graphql/dataloader
+9,Subscriptions,"Use PubSub with graphql-subscriptions for real-time updates","GraphQL subscriptions enable real-time data via WebSockets. Use PubSub for in-memory events in development, and a distributed pub/sub (Redis) for production with multiple server instances.","Use PubSub for dev; use Redis-backed PubSub for production; filter subscriptions to relevant data","Do not use in-memory PubSub in production with multiple instances; do not send excessive data over subscriptions","import { createServer } from 'http';
+import { WebSocketServer } from 'ws';
+import { useServer } from 'graphql-ws/lib/use/ws';
+import { PubSub, withFilter } from 'graphql-subscriptions';
+import { ApolloServer } from '@apollo/server';
+import { expressMiddleware } from '@apollo/server/express4';
+import { ApolloServerPluginDrainHttpServer } from '@apollo/server/plugin/drainHttpServer';
+import { makeExecutableSchema } from '@graphql-tools/schema';
+import { gql } from 'graphql-tag';
+
+const pubsub = new PubSub(); // Use RedisPubSub in production
+
+const typeDefs = gql`
+  type Message {
+    id: ID!
+    content: String!
+    channelId: ID!
+    author: User!
+    createdAt: DateTime!
+  }
+
+  type Subscription {
+    messageSent(channelId: ID!): Message!
+  }
+
+  type Mutation {
+    sendMessage(channelId: ID!, content: String!): Message!
+  }
+`;
+
+const resolvers = {
+  Mutation: {
+    sendMessage: async (_parent: unknown, { channelId, content }: { channelId: string; content: string }, context: GraphQLContext) => {
+      const message = await context.db.message.create({
+        data: { channelId, content, authorId: context.user!.id },
+        include: { author: true },
+      });
+      pubsub.publish('MESSAGE_SENT', { messageSent: message });
+      return message;
+    },
+  },
+  Subscription: {
+    messageSent: {
+      subscribe: withFilter(
+        () => pubsub.asyncIterator(['MESSAGE_SENT']),
+        (payload, variables) => payload.messageSent.channelId === variables.channelId
+      ),
+    },
+  },
+};","// BAD: No filtering, broadcasting everything to everyone
+const resolvers = {
+  Subscription: {
+    messageSent: {
+      // Every subscriber gets every message from every channel!
+      subscribe: () => pubsub.asyncIterator(['MESSAGE_SENT']),
+    },
+  },
+};
+
+// Also BAD: Using in-memory PubSub in production with load balancing
+// Server A publishes, Server B's subscribers never receive it",warning,https://www.apollographql.com/docs/apollo-server/data/subscriptions/
+10,Error Handling,"Use GraphQLError with extensions for structured error responses","Create custom error classes with error codes and use formatError to control what clients see. Include machine-readable codes for client-side error handling.","Use GraphQLError with code extensions; format errors for production; log full errors server-side","Do not expose stack traces; do not use generic error messages without codes; do not throw plain Error objects","import { GraphQLError } from 'graphql';
+
+// Custom error classes
+export class AuthenticationError extends GraphQLError {
+  constructor(message = 'Not authenticated') {
+    super(message, {
+      extensions: { code: 'UNAUTHENTICATED', http: { status: 401 } },
+    });
+  }
+}
+
+export class ForbiddenError extends GraphQLError {
+  constructor(message = 'Not authorized') {
+    super(message, {
+      extensions: { code: 'FORBIDDEN', http: { status: 403 } },
+    });
+  }
+}
+
+export class NotFoundError extends GraphQLError {
+  constructor(resource: string) {
+    super(`${resource} not found`, {
+      extensions: { code: 'NOT_FOUND', http: { status: 404 } },
+    });
+  }
+}
+
+export class ValidationError extends GraphQLError {
+  constructor(message: string, fields: Record<string, string[]>) {
+    super(message, {
+      extensions: { code: 'VALIDATION_ERROR', fields, http: { status: 400 } },
+    });
+  }
+}
+
+// Usage in resolvers
+const resolvers = {
+  Mutation: {
+    updatePost: async (_parent: unknown, { id, input }: any, context: GraphQLContext) => {
+      if (!context.user) throw new AuthenticationError();
+      const post = await context.db.post.findUnique({ where: { id } });
+      if (!post) throw new NotFoundError('Post');
+      if (post.authorId !== context.user.id) throw new ForbiddenError();
+      return context.db.post.update({ where: { id }, data: input });
+    },
+  },
+};","// BAD: Throwing plain errors, no codes, exposing internals
+const resolvers = {
+  Mutation: {
+    updatePost: async (_: any, { id, input }: any, context: any) => {
+      if (!context.user) {
+        throw new Error('You must be logged in'); // No error code
+      }
+      try {
+        return await context.db.post.update({ where: { id }, data: input });
+      } catch (err) {
+        // Exposes database error details to client!
+        throw new Error(`Database error: ${err.message}`);
+      }
+    },
+  },
+};",error,https://www.apollographql.com/docs/apollo-server/data/errors/
+11,Authentication,"Implement context-based authentication for GraphQL resolvers","Extract and verify JWT tokens in the context function. Pass the authenticated user through context to all resolvers. Use helper functions to require authentication.","Verify tokens in context; pass user through context; create requireAuth helper for protected resolvers","Do not verify tokens in individual resolvers; do not pass tokens through arguments; do not skip token expiration checks","// src/auth.ts
+import jwt from 'jsonwebtoken';
+import { AuthenticationError } from './errors';
+import type { GraphQLContext } from './context';
+
+const JWT_SECRET = process.env.JWT_SECRET!;
+
+export interface TokenPayload {
+  sub: string;
+  email: string;
+  role: string;
+  iat: number;
+  exp: number;
+}
+
+export function verifyToken(token: string): TokenPayload {
+  try {
+    return jwt.verify(token, JWT_SECRET) as TokenPayload;
+  } catch (error) {
+    throw new AuthenticationError('Invalid or expired token');
+  }
+}
+
+export function requireAuth(context: GraphQLContext) {
+  if (!context.user) {
+    throw new AuthenticationError();
+  }
+  return context.user;
+}
+
+export function requireRole(context: GraphQLContext, ...roles: string[]) {
+  const user = requireAuth(context);
+  if (!roles.includes(user.role)) {
+    throw new ForbiddenError(`Requires role: ${roles.join(' or ')}`);
+  }
+  return user;
+}
+
+// Usage in resolvers
+const resolvers = {
+  Query: {
+    me: (_parent: unknown, _args: unknown, context: GraphQLContext) => {
+      const user = requireAuth(context);
+      return context.db.user.findUnique({ where: { id: user.id } });
+    },
+  },
+  Mutation: {
+    deleteUser: async (_parent: unknown, { id }: { id: string }, context: GraphQLContext) => {
+      requireRole(context, 'ADMIN');
+      await context.db.user.delete({ where: { id } });
+      return true;
+    },
+  },
+};","// BAD: Auth check duplicated in every resolver, token parsed each time
+const resolvers = {
+  Query: {
+    me: async (_: any, __: any, context: any) => {
+      const auth = context.req.headers.authorization;
+      if (!auth) throw new Error('No auth');
+      const token = auth.split(' ')[1];
+      const decoded = jwt.verify(token, SECRET); // Duplicated everywhere!
+      return prisma.user.findUnique({ where: { id: decoded.sub } });
+    },
+    users: async (_: any, __: any, context: any) => {
+      // Same auth code copy-pasted again...
+      const auth = context.req.headers.authorization;
+      if (!auth) throw new Error('No auth');
+      const token = auth.split(' ')[1];
+      const decoded = jwt.verify(token, SECRET);
+      // ...
+    },
+  },
+};",error,https://www.apollographql.com/docs/apollo-server/security/authentication/
+12,Authorization,"Implement field-level authorization with resolver guards","Apply authorization checks at the field level to control what data each user can access. Use middleware patterns or directive-based auth for scalable permission management.","Implement field-level checks; use role-based and ownership-based authorization; separate auth from business logic","Do not rely solely on query-level auth; do not expose sensitive fields to unauthorized users","// src/auth/permissions.ts
+import { GraphQLError } from 'graphql';
+import type { GraphQLContext } from '../context';
+
+type ResolverFn = (parent: any, args: any, context: GraphQLContext, info: any) => any;
+
+export function authorized(roles: string[]) {
+  return (resolverFn: ResolverFn): ResolverFn => {
+    return (parent, args, context, info) => {
+      if (!context.user) {
+        throw new GraphQLError('Not authenticated', {
+          extensions: { code: 'UNAUTHENTICATED' },
+        });
+      }
+      if (roles.length > 0 && !roles.includes(context.user.role)) {
+        throw new GraphQLError('Not authorized', {
+          extensions: { code: 'FORBIDDEN' },
+        });
+      }
+      return resolverFn(parent, args, context, info);
+    };
+  };
+}
+
+// Resolvers with field-level authorization
+const resolvers = {
+  Query: {
+    users: authorized(['ADMIN'])(
+      (_parent, { first, after }, context) => {
+        return context.db.user.findMany({ take: first });
+      }
+    ),
+  },
+  User: {
+    // Only the user themselves or admins can see email
+    email: (parent: any, _args: unknown, context: GraphQLContext) => {
+      if (context.user?.id === parent.id || context.user?.role === 'ADMIN') {
+        return parent.email;
+      }
+      return null;
+    },
+    // Only admins can see role
+    role: (parent: any, _args: unknown, context: GraphQLContext) => {
+      if (context.user?.role === 'ADMIN') {
+        return parent.role;
+      }
+      return null;
+    },
+  },
+};","// BAD: No field-level auth -- all fields exposed to everyone
+const resolvers = {
+  Query: {
+    users: async (_: any, __: any, context: any) => {
+      if (!context.user) throw new Error('Not authenticated');
+      // Any authenticated user can see ALL user data
+      return prisma.user.findMany();
+    },
+  },
+  // No field-level resolvers -- email, role, etc. exposed to all
+};",error,https://www.apollographql.com/docs/apollo-server/security/authentication/#authorization-methods
+13,Pagination,"Implement cursor-based pagination with the Connection pattern","Use the Relay Connection specification for consistent, efficient pagination. Define Edge and Connection types with cursors, pageInfo, and totalCount.","Use cursor-based pagination with Connection/Edge types; include pageInfo with hasNextPage; encode cursors","Do not use offset-based pagination for large datasets; do not skip totalCount when clients need it","const typeDefs = gql`
+  type PageInfo {
+    hasNextPage: Boolean!
+    hasPreviousPage: Boolean!
+    startCursor: String
+    endCursor: String
+  }
+
+  type PostEdge {
+    cursor: String!
+    node: Post!
+  }
+
+  type PostConnection {
+    edges: [PostEdge!]!
+    pageInfo: PageInfo!
+    totalCount: Int!
+  }
+
+  type Query {
+    posts(first: Int = 20, after: String): PostConnection!
+  }
+`;
+
+// Resolver implementation
+function encodeCursor(id: string): string {
+  return Buffer.from(`cursor:${id}`).toString('base64');
+}
+
+function decodeCursor(cursor: string): string {
+  const decoded = Buffer.from(cursor, 'base64').toString('utf-8');
+  return decoded.replace('cursor:', '');
+}
+
+const resolvers = {
+  Query: {
+    posts: async (_parent: unknown, { first, after }: { first: number; after?: string }, context: GraphQLContext) => {
+      const take = Math.min(first, 100);
+      const where: any = {};
+
+      if (after) {
+        where.id = { gt: decodeCursor(after) };
+      }
+
+      const [posts, totalCount] = await Promise.all([
+        context.db.post.findMany({
+          where,
+          take: take + 1,
+          orderBy: { id: 'asc' },
+        }),
+        context.db.post.count(),
+      ]);
+
+      const hasNextPage = posts.length > take;
+      const edges = posts.slice(0, take).map((post) => ({
+        cursor: encodeCursor(post.id),
+        node: post,
+      }));
+
+      return {
+        edges,
+        pageInfo: {
+          hasNextPage,
+          hasPreviousPage: !!after,
+          startCursor: edges[0]?.cursor ?? null,
+          endCursor: edges[edges.length - 1]?.cursor ?? null,
+        },
+        totalCount,
+      };
+    },
+  },
+};","// BAD: Offset-based pagination, inconsistent with large datasets
+const resolvers = {
+  Query: {
+    posts: async (_: any, { page, limit }: any) => {
+      // Offset pagination gets slower as page number increases
+      const posts = await prisma.post.findMany({
+        skip: (page - 1) * limit,
+        take: limit,
+      });
+      return posts; // No pageInfo, no totalCount, no cursors
+    },
+  },
+};",warning,https://graphql.org/learn/pagination/
+14,Fragments,"Use fragments for reusable field selections","Fragments define reusable sets of fields that can be included in multiple queries. Define them alongside your type definitions and use them in client-side operations for consistency.","Define fragments for common field groups; use them in queries and mutations; colocate with components","Do not duplicate field selections across operations; do not create fragments that are too large","// src/fragments.ts -- server-side fragment definitions for documentation
+// Client-side usage with graphql-codegen
+
+// In your .graphql operation files:
+// src/graphql/fragments/user.graphql
+const USER_FRAGMENTS = gql`
+  fragment UserBasic on User {
+    id
+    name
+    email
+    avatar
+  }
+
+  fragment UserDetailed on User {
+    ...UserBasic
+    role
+    bio
+    createdAt
+    updatedAt
+  }
+
+  fragment PostSummary on Post {
+    id
+    title
+    excerpt
+    publishedAt
+    author {
+      ...UserBasic
+    }
+    tags
+  }
+
+  fragment PostFull on Post {
+    ...PostSummary
+    content
+    author {
+      ...UserDetailed
+    }
+    comments {
+      id
+      content
+      author {
+        ...UserBasic
+      }
+      createdAt
+    }
+  }
+`;
+
+// Usage in queries
+const GET_POSTS = gql`
+  ${USER_FRAGMENTS}
+
+  query GetPosts($first: Int!, $after: String) {
+    posts(first: $first, after: $after) {
+      edges {
+        node {
+          ...PostSummary
+        }
+      }
+      pageInfo {
+        hasNextPage
+        endCursor
+      }
+    }
+  }
+`;","// BAD: Duplicated field selections everywhere
+const GET_POSTS = gql`
+  query GetPosts {
+    posts {
+      id
+      title
+      excerpt
+      author { id name email avatar }
+    }
+  }
+`;
+
+const GET_POST = gql`
+  query GetPost($id: ID!) {
+    post(id: $id) {
+      id
+      title
+      excerpt       # Same fields duplicated
+      author { id name email avatar }  # Same author fields
+      content
+    }
+  }
+`;",info,https://graphql.org/learn/queries/#fragments
+15,Enums,"Define GraphQL enums for constrained value sets","Use GraphQL enum types for fields with a fixed set of values. Map them to TypeScript enums or string unions for type safety across the stack.","Define enums in the schema for status fields, roles, and categories; map to TypeScript types","Do not use plain strings for constrained values; do not forget to handle all enum values in resolvers","const typeDefs = gql`
+  enum PostStatus {
+    DRAFT
+    REVIEW
+    PUBLISHED
+    ARCHIVED
+  }
+
+  enum SortOrder {
+    ASC
+    DESC
+  }
+
+  enum PostSortField {
+    CREATED_AT
+    UPDATED_AT
+    TITLE
+    POPULARITY
+  }
+
+  input PostSortInput {
+    field: PostSortField!
+    order: SortOrder = DESC
+  }
+
+  type Post {
+    id: ID!
+    title: String!
+    status: PostStatus!
+  }
+
+  type Query {
+    posts(status: PostStatus, sort: PostSortInput): [Post!]!
+  }
+
+  type Mutation {
+    updatePostStatus(id: ID!, status: PostStatus!): Post!
+  }
+`;
+
+// Resolver with enum mapping to Prisma
+const SORT_FIELD_MAP: Record<string, string> = {
+  CREATED_AT: 'createdAt',
+  UPDATED_AT: 'updatedAt',
+  TITLE: 'title',
+  POPULARITY: 'viewCount',
+};
+
+const resolvers = {
+  Query: {
+    posts: async (_parent: unknown, { status, sort }: { status?: string; sort?: { field: string; order: string } }, context: GraphQLContext) => {
+      return context.db.post.findMany({
+        where: status ? { status } : undefined,
+        orderBy: sort
+          ? { [SORT_FIELD_MAP[sort.field]]: sort.order.toLowerCase() }
+          : { createdAt: 'desc' },
+      });
+    },
+  },
+};","// BAD: Using strings instead of enums
+const typeDefs = gql`
+  type Post {
+    id: ID!
+    title: String!
+    status: String!  # No validation -- could be any string
+  }
+
+  type Query {
+    posts(status: String): [Post!]!  # Client can pass ""banana""
+  }
+`;",warning,https://graphql.org/learn/schema/#enumeration-types
+16,Interfaces,"Use interfaces and union types for polymorphic data","GraphQL interfaces define shared fields, and union types represent one of several possible types. Use __resolveType to tell GraphQL which concrete type to return.","Define interfaces for shared fields; use unions for distinct types; always implement __resolveType","Do not create overly generic types with nullable fields instead of proper interfaces/unions","const typeDefs = gql`
+  interface Node {
+    id: ID!
+    createdAt: DateTime!
+  }
+
+  interface Notification {
+    id: ID!
+    message: String!
+    read: Boolean!
+    createdAt: DateTime!
+  }
+
+  type CommentNotification implements Notification {
+    id: ID!
+    message: String!
+    read: Boolean!
+    createdAt: DateTime!
+    comment: Comment!
+    post: Post!
+  }
+
+  type FollowNotification implements Notification {
+    id: ID!
+    message: String!
+    read: Boolean!
+    createdAt: DateTime!
+    follower: User!
+  }
+
+  type LikeNotification implements Notification {
+    id: ID!
+    message: String!
+    read: Boolean!
+    createdAt: DateTime!
+    liker: User!
+    post: Post!
+  }
+
+  union SearchResult = User | Post | Comment
+
+  type Query {
+    notifications: [Notification!]!
+    search(query: String!): [SearchResult!]!
+  }
+`;
+
+const resolvers = {
+  Notification: {
+    __resolveType(notification: any) {
+      if (notification.commentId) return 'CommentNotification';
+      if (notification.followerId) return 'FollowNotification';
+      if (notification.likerId) return 'LikeNotification';
+      return null;
+    },
+  },
+  SearchResult: {
+    __resolveType(obj: any) {
+      if (obj.email) return 'User';
+      if (obj.title) return 'Post';
+      if (obj.content && obj.postId) return 'Comment';
+      return null;
+    },
+  },
+};","// BAD: One generic type with nullable fields instead of interfaces
+const typeDefs = gql`
+  type Notification {
+    id: ID!
+    type: String!
+    message: String!
+    read: Boolean!
+    # All these are nullable because they only apply to certain types
+    comment: Comment
+    post: Post
+    follower: User
+    liker: User
+  }
+`;
+// Client has to check ""type"" and guess which fields are present",warning,https://graphql.org/learn/schema/#interfaces
+17,Directives,"Implement custom schema directives for cross-cutting concerns","Custom directives add reusable behavior to schema fields, like authentication, caching, and input formatting. Use @mapperDirective with schema transformers.","Use directives for cross-cutting concerns like auth, deprecation, and formatting; document directive usage","Do not overuse directives for business logic; do not create directives that duplicate resolver functionality","import { mapSchema, getDirective, MapperKind } from '@graphql-tools/utils';
+import { GraphQLSchema, defaultFieldResolver } from 'graphql';
+import { GraphQLError } from 'graphql';
+
+// Schema with custom directives
+const typeDefs = gql`
+  directive @auth(requires: Role = VIEWER) on FIELD_DEFINITION
+  directive @deprecated(reason: String) on FIELD_DEFINITION
+  directive @cacheControl(maxAge: Int!) on FIELD_DEFINITION
+
+  enum Role {
+    ADMIN
+    EDITOR
+    VIEWER
+  }
+
+  type Query {
+    publicPosts: [Post!]!
+    users: [User!]! @auth(requires: ADMIN)
+    analytics: Analytics! @auth(requires: EDITOR) @cacheControl(maxAge: 300)
+  }
+`;
+
+// Directive transformer
+function authDirectiveTransformer(schema: GraphQLSchema): GraphQLSchema {
+  return mapSchema(schema, {
+    [MapperKind.OBJECT_FIELD]: (fieldConfig) => {
+      const authDirective = getDirective(schema, fieldConfig, 'auth')?.[0];
+      if (!authDirective) return fieldConfig;
+
+      const requiredRole = authDirective.requires;
+      const originalResolve = fieldConfig.resolve ?? defaultFieldResolver;
+
+      fieldConfig.resolve = async (source, args, context, info) => {
+        if (!context.user) {
+          throw new GraphQLError('Not authenticated', {
+            extensions: { code: 'UNAUTHENTICATED' },
+          });
+        }
+        const roleHierarchy = ['VIEWER', 'EDITOR', 'ADMIN'];
+        const userRoleIndex = roleHierarchy.indexOf(context.user.role);
+        const requiredRoleIndex = roleHierarchy.indexOf(requiredRole);
+        if (userRoleIndex < requiredRoleIndex) {
+          throw new GraphQLError(`Requires ${requiredRole} role`, {
+            extensions: { code: 'FORBIDDEN' },
+          });
+        }
+        return originalResolve(source, args, context, info);
+      };
+      return fieldConfig;
+    },
+  });
+}","// BAD: Duplicating auth checks in every resolver instead of using directives
+const resolvers = {
+  Query: {
+    users: async (_: any, __: any, context: any) => {
+      // Same auth check copy-pasted in every admin resolver
+      if (!context.user) throw new Error('Not authenticated');
+      if (context.user.role !== 'ADMIN') throw new Error('Not authorized');
+      return prisma.user.findMany();
+    },
+    analytics: async (_: any, __: any, context: any) => {
+      // Copy-pasted again with different role
+      if (!context.user) throw new Error('Not authenticated');
+      if (!['ADMIN', 'EDITOR'].includes(context.user.role)) throw new Error('Not authorized');
+      return getAnalytics();
+    },
+  },
+};",info,https://www.apollographql.com/docs/apollo-server/schema/directives/
+18,File Upload,"Handle file uploads with graphql-upload middleware","Use graphql-upload for handling multipart file uploads in GraphQL. Define an Upload scalar and process files in mutation resolvers with proper validation.","Use graphql-upload middleware; validate file types and sizes; stream files to storage","Do not load entire files into memory; do not skip file type validation; do not store uploaded files in the public directory without scanning","import graphqlUploadExpress from 'graphql-upload/graphqlUploadExpress.mjs';
+import type { FileUpload } from 'graphql-upload/Upload.mjs';
+import GraphQLUpload from 'graphql-upload/GraphQLUpload.mjs';
+import { gql } from 'graphql-tag';
+import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
+import { pipeline } from 'stream/promises';
+
+const typeDefs = gql`
+  scalar Upload
+
+  type UploadResult {
+    url: String!
+    filename: String!
+    mimetype: String!
+    size: Int!
+  }
+
+  type Mutation {
+    uploadFile(file: Upload!): UploadResult!
+    uploadAvatar(file: Upload!): User!
+  }
+`;
+
+const ALLOWED_MIME_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
+const MAX_FILE_SIZE = 5 * 1024 * 1024; // 5MB
+
+const resolvers = {
+  Upload: GraphQLUpload,
+
+  Mutation: {
+    uploadFile: async (_parent: unknown, { file }: { file: Promise<FileUpload> }, context: GraphQLContext) => {
+      const { createReadStream, filename, mimetype } = await file;
+
+      if (!ALLOWED_MIME_TYPES.includes(mimetype)) {
+        throw new GraphQLError(`File type ${mimetype} not allowed`, {
+          extensions: { code: 'BAD_USER_INPUT' },
+        });
+      }
+
+      const stream = createReadStream();
+      const chunks: Buffer[] = [];
+      let size = 0;
+
+      for await (const chunk of stream) {
+        size += (chunk as Buffer).length;
+        if (size > MAX_FILE_SIZE) {
+          stream.destroy();
+          throw new GraphQLError('File too large (max 5MB)', {
+            extensions: { code: 'BAD_USER_INPUT' },
+          });
+        }
+        chunks.push(chunk as Buffer);
+      }
+
+      const buffer = Buffer.concat(chunks);
+      const key = `uploads/${Date.now()}-${filename}`;
+
+      const s3 = new S3Client({});
+      await s3.send(new PutObjectCommand({
+        Bucket: process.env.S3_BUCKET!,
+        Key: key,
+        Body: buffer,
+        ContentType: mimetype,
+      }));
+
+      return { url: `https://${process.env.S3_BUCKET}.s3.amazonaws.com/${key}`, filename, mimetype, size };
+    },
+  },
+};
+
+// Express middleware setup
+// app.use(graphqlUploadExpress({ maxFileSize: 5_000_000, maxFiles: 5 }));","// BAD: No validation, loading entire file into memory unsafely
+const resolvers = {
+  Mutation: {
+    uploadFile: async (_: any, { file }: any) => {
+      const { createReadStream, filename } = await file;
+      const stream = createReadStream();
+      // No size limit -- could crash server with huge file
+      // No type validation -- could be an executable
+      const path = `./public/uploads/${filename}`; // Path traversal risk!
+      const writeStream = fs.createWriteStream(path);
+      stream.pipe(writeStream);
+      return { url: `/uploads/${filename}` };
+    },
+  },
+};",warning,https://github.com/jaydenseric/graphql-upload
+19,Code-First (NestJS),"Use NestJS decorators for code-first GraphQL schema generation","NestJS GraphQL module supports code-first schema generation using TypeScript decorators. Define types with @ObjectType, fields with @Field, and resolvers with @Resolver.","Use decorators for type definitions; leverage class-validator for input validation; use NestJS DI for services","Do not mix code-first and schema-first approaches; do not skip validation decorators on inputs","import { ObjectType, Field, ID, InputType, Int, registerEnumType } from '@nestjs/graphql';
+import { IsEmail, MinLength, IsOptional, MaxLength } from 'class-validator';
+import { Resolver, Query, Mutation, Args, ResolveField, Parent } from '@nestjs/graphql';
+
+enum UserRole {
+  ADMIN = 'ADMIN',
+  EDITOR = 'EDITOR',
+  VIEWER = 'VIEWER',
+}
+
+registerEnumType(UserRole, { name: 'UserRole', description: 'User roles' });
+
+@ObjectType({ description: 'A registered user' })
+class User {
+  @Field(() => ID)
+  id!: string;
+
+  @Field()
+  name!: string;
+
+  @Field()
+  email!: string;
+
+  @Field(() => UserRole)
+  role!: UserRole;
+
+  @Field(() => [Post])
+  posts!: Post[];
+}
+
+@InputType()
+class CreateUserInput {
+  @Field()
+  @MinLength(2)
+  name!: string;
+
+  @Field()
+  @IsEmail()
+  email!: string;
+
+  @Field()
+  @MinLength(8)
+  password!: string;
+}
+
+@InputType()
+class UpdateUserInput {
+  @Field({ nullable: true })
+  @IsOptional()
+  @MinLength(2)
+  name?: string;
+
+  @Field({ nullable: true })
+  @IsOptional()
+  @MaxLength(500)
+  bio?: string;
+}
+
+@Resolver(() => User)
+class UserResolver {
+  constructor(
+    private readonly userService: UserService,
+    private readonly postService: PostService,
+  ) {}
+
+  @Query(() => User, { nullable: true })
+  async me(@CurrentUser() user: TokenPayload) {
+    return this.userService.findById(user.sub);
+  }
+
+  @Mutation(() => User)
+  async createUser(@Args('input') input: CreateUserInput) {
+    return this.userService.create(input);
+  }
+
+  @ResolveField(() => [Post])
+  async posts(@Parent() user: User) {
+    return this.postService.findByAuthor(user.id);
+  }
+}","// BAD: No validation decorators, mixing approaches
+@ObjectType()
+class User {
+  @Field()
+  id!: string;  // Should use ID type
+
+  @Field()
+  name!: string;
+}
+
+@InputType()
+class CreateUserInput {
+  @Field()
+  name!: string;  // No validation!
+
+  @Field()
+  email!: string;  // No @IsEmail()!
+
+  @Field()
+  password!: string;  // No @MinLength()!
+}",warning,https://docs.nestjs.com/graphql/quick-start
+20,Schema-First,"Load .graphql schema files and generate TypeScript types","In the schema-first approach, define schemas in .graphql files and use graphql-codegen to generate TypeScript types for resolvers. Keep schemas as the single source of truth.","Keep schemas in .graphql files; use graphql-codegen for types; organize by domain","Do not manually write resolver types; do not let types drift from schema; do not put all types in one file","// schema/user.graphql
+// type User {
+//   id: ID!
+//   name: String!
+//   email: String!
+//   posts(first: Int = 10): [Post!]!
+// }
+//
+// type Query {
+//   me: User
+//   user(id: ID!): User
+// }
+
+// codegen.ts
+import type { CodegenConfig } from '@graphql-codegen/cli';
+
+const config: CodegenConfig = {
+  schema: './schema/**/*.graphql',
+  generates: {
+    './src/generated/graphql.ts': {
+      plugins: [
+        'typescript',
+        'typescript-resolvers',
+      ],
+      config: {
+        contextType: '../context#GraphQLContext',
+        mappers: {
+          User: '../models/user#UserModel',
+          Post: '../models/post#PostModel',
+        },
+        useIndexSignature: true,
+      },
+    },
+  },
+};
+
+export default config;
+
+// src/resolvers/user.resolver.ts
+import type { Resolvers } from '../generated/graphql';
+import { requireAuth } from '../auth';
+
+export const userResolvers: Resolvers = {
+  Query: {
+    me: (_parent, _args, context) => {
+      const user = requireAuth(context);
+      return context.db.user.findUnique({ where: { id: user.id } });
+    },
+    user: (_parent, { id }, context) => {
+      return context.db.user.findUnique({ where: { id } });
+    },
+  },
+  User: {
+    posts: (parent, { first }, context) => {
+      return context.db.post.findMany({
+        where: { authorId: parent.id },
+        take: first ?? 10,
+      });
+    },
+  },
+};","// BAD: Manually writing types that drift from schema
+interface UserResolvers {
+  Query: {
+    me: (parent: any, args: any, context: any) => any;
+    // Forgot to add 'user' resolver -- no type error!
+  };
+}
+
+// Types get out of sync with schema after changes
+// No compilation error when resolver signature is wrong",warning,https://the-guild.dev/graphql/codegen
+21,Testing,"Use executeOperation for integration testing GraphQL resolvers","Apollo Server's executeOperation method runs queries against your server without HTTP, making it fast and reliable for testing. Create a test server with mock context.","Use executeOperation for resolver tests; mock context with auth and db; test both success and error paths","Do not test resolvers by calling them as plain functions; do not skip error case testing; do not use real databases in unit tests","import { ApolloServer } from '@apollo/server';
+import { typeDefs } from '../schema';
+import { resolvers } from '../resolvers';
+import type { GraphQLContext } from '../context';
+
+function createTestServer(contextValue: Partial<GraphQLContext> = {}) {
+  return new ApolloServer<GraphQLContext>({
+    typeDefs,
+    resolvers,
+  });
+}
+
+const mockUser = { id: 'user-1', email: 'test@test.com', role: 'ADMIN' };
+
+describe('User Resolvers', () => {
+  it('should return the current user for me query', async () => {
+    const server = createTestServer();
+    const result = await server.executeOperation(
+      {
+        query: `query Me {
+          me {
+            id
+            name
+            email
+          }
+        }`,
+      },
+      {
+        contextValue: {
+          user: mockUser,
+          db: {
+            user: {
+              findUnique: jest.fn().mockResolvedValue({
+                id: 'user-1',
+                name: 'Test User',
+                email: 'test@test.com',
+              }),
+            },
+          },
+        } as any,
+      }
+    );
+
+    expect(result.body.kind).toBe('single');
+    if (result.body.kind === 'single') {
+      expect(result.body.singleResult.errors).toBeUndefined();
+      expect(result.body.singleResult.data?.me).toEqual({
+        id: 'user-1',
+        name: 'Test User',
+        email: 'test@test.com',
+      });
+    }
+  });
+
+  it('should return auth error when not authenticated', async () => {
+    const server = createTestServer();
+    const result = await server.executeOperation(
+      {
+        query: `mutation DeleteUser($id: ID!) {
+          deleteUser(id: $id)
+        }`,
+        variables: { id: 'user-2' },
+      },
+      {
+        contextValue: { user: null, db: {} } as any,
+      }
+    );
+
+    if (result.body.kind === 'single') {
+      expect(result.body.singleResult.errors?.[0].extensions?.code).toBe('UNAUTHENTICATED');
+    }
+  });
+});","// BAD: Testing resolvers as plain functions, no integration
+describe('User Resolvers', () => {
+  it('should get user', async () => {
+    // Testing the function directly misses middleware, auth, and schema validation
+    const result = await resolvers.Query.me(
+      null as any,
+      {} as any,
+      { user: mockUser } as any,
+      {} as any
+    );
+    expect(result).toBeDefined();
+    // Does not test: auth directives, input validation, error formatting
+  });
+});",warning,https://www.apollographql.com/docs/apollo-server/testing/testing/
+22,Schema Stitching,"Combine multiple GraphQL schemas with schema stitching or federation","Use @graphql-tools/stitch to combine multiple schemas into a single gateway. Define type merging for shared types and delegate fields between schemas.","Use stitchSchemas with type merging; keep subschemas independent; define clear merge boundaries","Do not duplicate types across schemas without merging; do not create circular dependencies between subschemas","import { stitchSchemas } from '@graphql-tools/stitch';
+import { delegateToSchema } from '@graphql-tools/delegate';
+import { makeExecutableSchema } from '@graphql-tools/schema';
+
+// User service schema
+const userSchema = makeExecutableSchema({
+  typeDefs: gql`
+    type User {
+      id: ID!
+      name: String!
+      email: String!
+    }
+    type Query {
+      user(id: ID!): User
+      users: [User!]!
+    }
+  `,
+  resolvers: userResolvers,
+});
+
+// Post service schema
+const postSchema = makeExecutableSchema({
+  typeDefs: gql`
+    type Post {
+      id: ID!
+      title: String!
+      content: String!
+      authorId: ID!
+    }
+    type User {
+      id: ID!
+      posts: [Post!]!
+    }
+    type Query {
+      post(id: ID!): Post
+      posts: [Post!]!
+    }
+  `,
+  resolvers: postResolvers,
+});
+
+// Stitched gateway schema
+const gatewaySchema = stitchSchemas({
+  subschemas: [
+    {
+      schema: userSchema,
+      merge: {
+        User: {
+          selectionSet: '{ id }',
+          fieldName: 'user',
+          args: (originalObject: any) => ({ id: originalObject.id }),
+        },
+      },
+    },
+    {
+      schema: postSchema,
+      merge: {
+        User: {
+          selectionSet: '{ id }',
+          fieldName: '_sdl',
+          // Merge User.posts from post service
+        },
+      },
+    },
+  ],
+});","// BAD: Manually merging schemas without type merging
+const typeDefs = gql`
+  # Duplicated User type -- will cause conflicts
+  type User {
+    id: ID!
+    name: String!
+    email: String!
+    posts: [Post!]!  # Mixed concerns
+  }
+  type Post {
+    id: ID!
+    title: String!
+    author: User!  # Tight coupling
+  }
+`;
+// Everything in one schema -- no separation of concerns
+// Cannot scale to multiple teams or services",info,https://the-guild.dev/graphql/stitching
+23,Rate Limiting,"Implement query complexity and rate limiting for GraphQL APIs","GraphQL APIs are vulnerable to expensive queries. Use query complexity analysis and rate limiting to prevent abuse and protect server resources.","Use complexity analysis to limit query depth and cost; implement per-user rate limits; reject overly complex queries","Do not allow unbounded query depth; do not skip rate limiting; do not treat all queries as equal cost","import { createComplexityLimitRule } from 'graphql-validation-complexity';
+import depthLimit from 'graphql-depth-limit';
+import { ApolloServer } from '@apollo/server';
+import { rateLimitDirective } from 'graphql-rate-limit-directive';
+
+// Depth limiting
+const depthLimitRule = depthLimit(10, { ignore: ['__schema', '__type'] });
+
+// Complexity limiting
+const complexityLimitRule = createComplexityLimitRule(1000, {
+  scalarCost: 1,
+  objectCost: 2,
+  listFactor: 10,
+  onCost: (cost: number) => {
+    console.log(`Query complexity: ${cost}`);
+  },
+});
+
+// Rate limit directive
+const { rateLimitDirectiveTypeDefs, rateLimitDirectiveTransformer } = rateLimitDirective();
+
+const typeDefs = gql`
+  ${rateLimitDirectiveTypeDefs}
+
+  type Query {
+    \"\"\"Public query with strict rate limit\"\"\"
+    posts: [Post!]! @rateLimit(limit: 60, duration: 60)
+
+    \"\"\"Expensive query with lower rate limit\"\"\"
+    analytics: Analytics! @rateLimit(limit: 10, duration: 60)
+
+    \"\"\"Auth-protected, less strict\"\"\"
+    me: User @rateLimit(limit: 120, duration: 60)
+  }
+
+  type Mutation {
+    \"\"\"Strict rate limit on mutations\"\"\"
+    createPost(input: CreatePostInput!): Post! @rateLimit(limit: 20, duration: 60)
+
+    \"\"\"Very strict on auth attempts\"\"\"
+    login(email: String!, password: String!): AuthPayload! @rateLimit(limit: 5, duration: 300)
+  }
+`;
+
+const server = new ApolloServer({
+  typeDefs,
+  resolvers,
+  validationRules: [depthLimitRule, complexityLimitRule],
+});","// BAD: No depth or complexity limits
+const server = new ApolloServer({
+  typeDefs,
+  resolvers,
+  // No validation rules! Attacker can send:
+  // query { users { posts { author { posts { author { posts { ... } } } } } } }
+  // This query can crash the server with deeply nested resolution
+});",error,https://www.apollographql.com/blog/securing-your-graphql-api-from-malicious-queries
+24,Caching,"Configure Apollo cache control for response-level and field-level caching","Use cacheControl hints on schema fields to enable CDN and client caching. Set maxAge and scope (PUBLIC or PRIVATE) to control caching behavior per field.","Set cache hints on fields; use PUBLIC for shared data and PRIVATE for user-specific data; configure CDN headers","Do not cache user-specific data as PUBLIC; do not set maxAge too high for frequently changing data; do not skip caching entirely","import { ApolloServer } from '@apollo/server';
+import { ApolloServerPluginCacheControl } from '@apollo/server/plugin/cacheControl';
+import responseCachePlugin from '@apollo/server-plugin-response-cache';
+import { gql } from 'graphql-tag';
+
+const typeDefs = gql`
+  enum CacheControlScope {
+    PUBLIC
+    PRIVATE
+  }
+
+  directive @cacheControl(
+    maxAge: Int
+    scope: CacheControlScope
+    inheritMaxAge: Boolean
+  ) on FIELD_DEFINITION | OBJECT | INTERFACE | UNION
+
+  type PublicPost @cacheControl(maxAge: 300) {
+    id: ID!
+    title: String!
+    content: String!
+    author: PublicAuthor! @cacheControl(inheritMaxAge: true)
+    viewCount: Int! @cacheControl(maxAge: 60)
+  }
+
+  type PublicAuthor @cacheControl(maxAge: 600) {
+    id: ID!
+    name: String!
+    bio: String
+  }
+
+  type UserProfile @cacheControl(maxAge: 60, scope: PRIVATE) {
+    id: ID!
+    name: String!
+    email: String!
+    settings: UserSettings! @cacheControl(maxAge: 30, scope: PRIVATE)
+  }
+
+  type Query {
+    publicPosts: [PublicPost!]! @cacheControl(maxAge: 120)
+    post(id: ID!): PublicPost @cacheControl(maxAge: 300)
+    me: UserProfile @cacheControl(maxAge: 0, scope: PRIVATE)
+  }
+`;
+
+const server = new ApolloServer({
+  typeDefs,
+  resolvers,
+  plugins: [
+    ApolloServerPluginCacheControl({
+      defaultMaxAge: 0, // Default: no caching unless explicitly set
+    }),
+    responseCachePlugin({
+      sessionId: async (requestContext) => {
+        return requestContext.request.http?.headers.get('authorization') || null;
+      },
+    }),
+  ],
+});","// BAD: No cache control -- every request hits the database
+const server = new ApolloServer({
+  typeDefs: gql`
+    type Post {
+      id: ID!
+      title: String!
+      # No cache hints -- never cached
+    }
+    type Query {
+      posts: [Post!]!
+      me: User  # User data not marked private -- could be cached publicly!
+    }
+  `,
+  resolvers,
+  // No cache control plugin, no response cache
+});",info,https://www.apollographql.com/docs/apollo-server/performance/caching/
+25,Codegen,"Use graphql-codegen to generate TypeScript types from schema and operations","graphql-codegen generates TypeScript types from your GraphQL schema and client operations. This ensures end-to-end type safety between schema, resolvers, and client queries.","Configure codegen for both server resolvers and client operations; run codegen in CI; use typed document nodes","Do not manually write GraphQL types; do not skip codegen in CI; do not import from generated files without running codegen first","// codegen.ts
+import type { CodegenConfig } from '@graphql-codegen/cli';
+
+const config: CodegenConfig = {
+  overwrite: true,
+  schema: './src/schema/**/*.graphql',
+  documents: './src/client/**/*.graphql',
+  generates: {
+    // Server-side resolver types
+    './src/generated/resolvers-types.ts': {
+      plugins: ['typescript', 'typescript-resolvers'],
+      config: {
+        contextType: '../context#GraphQLContext',
+        mappers: {
+          User: '@prisma/client#User as UserModel',
+          Post: '@prisma/client#Post as PostModel',
+        },
+        enumsAsTypes: true,
+        useIndexSignature: true,
+      },
+    },
+    // Client-side operation types
+    './src/generated/graphql.ts': {
+      plugins: [
+        'typescript',
+        'typescript-operations',
+        'typed-document-node',
+      ],
+      config: {
+        dedupeFragments: true,
+        scalars: {
+          DateTime: 'string',
+          JSON: 'Record<string, unknown>',
+        },
+      },
+    },
+  },
+  hooks: {
+    afterAllFileWrite: ['prettier --write'],
+  },
+};
+
+export default config;
+
+// package.json scripts:
+// ""codegen"": ""graphql-codegen --config codegen.ts"",
+// ""codegen:watch"": ""graphql-codegen --config codegen.ts --watch"",
+// ""prebuild"": ""npm run codegen""
+
+// Usage with generated typed document node:
+// import { GetPostsDocument } from './generated/graphql';
+// const result = await client.query({ query: GetPostsDocument });
+// result.data.posts -- fully typed!","// BAD: Manually writing types, getting out of sync
+// types/graphql.ts -- manually maintained
+interface User {
+  id: string;
+  name: string;
+  email: string;
+  // Forgot to add 'role' field that was added to schema last week!
+}
+
+interface GetUsersQuery {
+  users: User[];
+  // Manually maintaining this is error-prone
+}
+
+// No compile-time safety when schema changes
+// Client and server types drift apart over time",warning,https://the-guild.dev/graphql/codegen

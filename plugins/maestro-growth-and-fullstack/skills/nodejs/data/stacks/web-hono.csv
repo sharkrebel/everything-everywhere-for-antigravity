@@ -1,0 +1,1217 @@
+No,Category,Guideline,Description,Do,Dont,Code Good,Code Bad,Severity,Docs URL
+1,Setup,"Initialize Hono app with TypeScript","Create a Hono application with proper TypeScript configuration for type-safe routing and middleware.","Use the generic Hono<Env> constructor with typed environment bindings","Don't use untyped Hono() without defining your environment types","import { Hono } from 'hono';
+
+type Env = {
+  Bindings: {
+    DATABASE_URL: string;
+    JWT_SECRET: string;
+  };
+  Variables: {
+    userId: string;
+    role: 'admin' | 'user';
+  };
+};
+
+const app = new Hono<Env>();
+
+app.get('/', (c) => {
+  const dbUrl = c.env.DATABASE_URL; // fully typed
+  return c.json({ status: 'ok' });
+});
+
+export default app;","import { Hono } from 'hono';
+
+const app = new Hono();
+
+app.get('/', (c) => {
+  const dbUrl = c.env.DATABASE_URL; // any type, no safety
+  return c.json({ status: 'ok' });
+});
+
+export default app;",error,https://hono.dev/docs/api/hono
+2,Routing,"Use context helpers for responses","Hono provides c.req for request parsing and c.json, c.text, c.html for typed responses. Always use these instead of constructing raw Response objects.","Use c.json() for JSON responses, c.text() for plain text, and c.req.param() for route parameters","Don't construct new Response() manually or parse the URL yourself for parameters","import { Hono } from 'hono';
+
+const app = new Hono();
+
+app.get('/users/:id', async (c) => {
+  const id = c.req.param('id');
+  const { page } = c.req.query();
+  const body = await c.req.json<{ name: string }>();
+
+  return c.json({ id, page }, 200);
+});
+
+app.get('/health', (c) => {
+  return c.text('OK', 200);
+});","import { Hono } from 'hono';
+
+const app = new Hono();
+
+app.get('/users/:id', async (c) => {
+  const url = new URL(c.req.url);
+  const id = url.pathname.split('/')[2];
+  const page = url.searchParams.get('page');
+
+  return new Response(JSON.stringify({ id, page }), {
+    headers: { 'Content-Type': 'application/json' },
+  });
+});",warning,https://hono.dev/docs/api/context
+3,Route Groups,"Organize routes with app.route()","Use app.route() to mount sub-applications at path prefixes. This keeps your codebase modular and each route group in its own file.","Split routes into separate Hono instances and mount them with app.route()","Don't define all routes in a single flat file with repeated prefixes","import { Hono } from 'hono';
+
+// routes/users.ts
+const users = new Hono();
+users.get('/', (c) => c.json({ users: [] }));
+users.get('/:id', (c) => {
+  const id = c.req.param('id');
+  return c.json({ id });
+});
+users.post('/', async (c) => {
+  const body = await c.req.json();
+  return c.json(body, 201);
+});
+
+// routes/posts.ts
+const posts = new Hono();
+posts.get('/', (c) => c.json({ posts: [] }));
+
+// app.ts
+const app = new Hono();
+app.route('/api/users', users);
+app.route('/api/posts', posts);
+
+export default app;","import { Hono } from 'hono';
+
+const app = new Hono();
+
+app.get('/api/users', (c) => c.json({ users: [] }));
+app.get('/api/users/:id', (c) => c.json({ id: c.req.param('id') }));
+app.post('/api/users', async (c) => c.json(await c.req.json(), 201));
+app.get('/api/posts', (c) => c.json({ posts: [] }));
+app.get('/api/posts/:id', (c) => c.json({ id: c.req.param('id') }));
+
+export default app;",warning,https://hono.dev/docs/api/routing
+4,Middleware,"Create custom middleware with c.next()","Custom middleware in Hono uses the (c, next) signature. Always await next() and perform post-processing after the await if needed.","Await c.next() in middleware and handle both pre- and post-processing correctly","Don't forget to await next() or skip calling it which blocks downstream handlers","import { Hono } from 'hono';
+import type { MiddlewareHandler } from 'hono';
+
+const logger: MiddlewareHandler = async (c, next) => {
+  const start = Date.now();
+  console.log(`--> ${c.req.method} ${c.req.path}`);
+
+  await next();
+
+  const duration = Date.now() - start;
+  c.header('X-Response-Time', `${duration}ms`);
+  console.log(`<-- ${c.req.method} ${c.req.path} ${c.res.status} ${duration}ms`);
+};
+
+const app = new Hono();
+app.use('*', logger);
+
+app.get('/', (c) => c.text('Hello'));
+
+export default app;","import { Hono } from 'hono';
+
+const logger = async (c: any, next: any) => {
+  const start = Date.now();
+  console.log(`--> ${c.req.method} ${c.req.path}`);
+  next(); // Missing await - post-processing runs before handler completes
+  const duration = Date.now() - start;
+  console.log(`<-- ${duration}ms`);
+};
+
+const app = new Hono();
+app.use('*', logger);
+
+export default app;",error,https://hono.dev/docs/guides/middleware
+5,Zod Validation,"Use zValidator middleware for request validation","The @hono/zod-validator package provides zValidator middleware that validates request body, query, params, and headers against Zod schemas with full type inference.","Use zValidator with target specifiers (json, query, param) for typed and validated requests","Don't manually parse and validate request data inside handlers","import { Hono } from 'hono';
+import { zValidator } from '@hono/zod-validator';
+import { z } from 'zod';
+
+const createUserSchema = z.object({
+  name: z.string().min(1).max(100),
+  email: z.string().email(),
+  age: z.number().int().min(0).optional(),
+});
+
+const querySchema = z.object({
+  page: z.coerce.number().int().min(1).default(1),
+  limit: z.coerce.number().int().min(1).max(100).default(20),
+});
+
+const app = new Hono();
+
+app.post(
+  '/users',
+  zValidator('json', createUserSchema),
+  (c) => {
+    const data = c.req.valid('json'); // fully typed
+    return c.json({ user: data }, 201);
+  }
+);
+
+app.get(
+  '/users',
+  zValidator('query', querySchema),
+  (c) => {
+    const { page, limit } = c.req.valid('query'); // typed
+    return c.json({ page, limit });
+  }
+);
+
+export default app;","import { Hono } from 'hono';
+
+const app = new Hono();
+
+app.post('/users', async (c) => {
+  const body = await c.req.json();
+
+  if (!body.name || typeof body.name !== 'string') {
+    return c.json({ error: 'Invalid name' }, 400);
+  }
+  if (!body.email || !body.email.includes('@')) {
+    return c.json({ error: 'Invalid email' }, 400);
+  }
+
+  return c.json({ user: body }, 201);
+});
+
+export default app;",error,https://hono.dev/docs/guides/validation
+6,Error Handling,"Use app.onError for global error handling","Register a global error handler with app.onError to catch unhandled exceptions. Use HTTPException for expected errors with proper status codes.","Use app.onError for global handling and throw HTTPException for known error states","Don't wrap every handler in try-catch or let errors propagate unhandled","import { Hono } from 'hono';
+import { HTTPException } from 'hono/http-exception';
+
+const app = new Hono();
+
+app.onError((err, c) => {
+  if (err instanceof HTTPException) {
+    return err.getResponse();
+  }
+  console.error('Unhandled error:', err);
+  return c.json(
+    { error: 'Internal Server Error', message: err.message },
+    500
+  );
+});
+
+app.notFound((c) => {
+  return c.json({ error: 'Not Found', path: c.req.path }, 404);
+});
+
+app.get('/users/:id', async (c) => {
+  const id = c.req.param('id');
+  const user = await findUser(id);
+
+  if (!user) {
+    throw new HTTPException(404, { message: `User ${id} not found` });
+  }
+
+  return c.json(user);
+});
+
+export default app;","import { Hono } from 'hono';
+
+const app = new Hono();
+
+app.get('/users/:id', async (c) => {
+  try {
+    const id = c.req.param('id');
+    const user = await findUser(id);
+    if (!user) {
+      return c.json({ error: 'Not found' }, 404);
+    }
+    return c.json(user);
+  } catch (e) {
+    return c.json({ error: 'Server error' }, 500);
+  }
+});
+
+export default app;",error,https://hono.dev/docs/api/hono#error-handling
+7,Context Variables,"Use c.set/c.get for typed request-scoped state","Store request-scoped data with c.set() and retrieve it with c.get(). Define the Variables type in your Env generic for full type safety.","Define Variables in Env type and use c.set/c.get for request-scoped state","Don't use global mutable state or attach properties to the request object directly","import { Hono } from 'hono';
+import type { MiddlewareHandler } from 'hono';
+
+type Env = {
+  Variables: {
+    user: { id: string; email: string; role: string };
+    requestId: string;
+  };
+};
+
+const authMiddleware: MiddlewareHandler<Env> = async (c, next) => {
+  const token = c.req.header('Authorization')?.replace('Bearer ', '');
+  const user = await verifyToken(token);
+  c.set('user', user);
+  c.set('requestId', crypto.randomUUID());
+  await next();
+};
+
+const app = new Hono<Env>();
+
+app.use('/api/*', authMiddleware);
+
+app.get('/api/profile', (c) => {
+  const user = c.get('user'); // typed as { id: string; email: string; role: string }
+  const reqId = c.get('requestId');
+  return c.json({ user, requestId: reqId });
+});
+
+export default app;","import { Hono } from 'hono';
+
+let currentUser: any = null; // global mutable state - race condition danger
+
+const app = new Hono();
+
+app.use('/api/*', async (c, next) => {
+  const token = c.req.header('Authorization')?.replace('Bearer ', '');
+  currentUser = await verifyToken(token);
+  await next();
+});
+
+app.get('/api/profile', (c) => {
+  return c.json({ user: currentUser }); // wrong user under concurrency
+});
+
+export default app;",error,https://hono.dev/docs/api/context#set-get
+8,Auth Middleware,"Create Bearer token authentication middleware","Build reusable auth middleware that validates Bearer tokens and sets user context for downstream handlers.","Create a typed middleware that validates tokens and sets user variables on the context","Don't duplicate auth logic in every route handler or use inline auth checks","import { Hono } from 'hono';
+import { HTTPException } from 'hono/http-exception';
+import type { MiddlewareHandler } from 'hono';
+
+type Env = {
+  Variables: {
+    userId: string;
+    userRole: 'admin' | 'user';
+  };
+};
+
+const bearerAuth: MiddlewareHandler<Env> = async (c, next) => {
+  const authHeader = c.req.header('Authorization');
+  if (!authHeader?.startsWith('Bearer ')) {
+    throw new HTTPException(401, { message: 'Missing Bearer token' });
+  }
+
+  const token = authHeader.substring(7);
+  try {
+    const payload = await verifyJwt(token);
+    c.set('userId', payload.sub);
+    c.set('userRole', payload.role);
+  } catch {
+    throw new HTTPException(401, { message: 'Invalid or expired token' });
+  }
+
+  await next();
+};
+
+const requireRole = (role: string): MiddlewareHandler<Env> => {
+  return async (c, next) => {
+    if (c.get('userRole') !== role) {
+      throw new HTTPException(403, { message: 'Insufficient permissions' });
+    }
+    await next();
+  };
+};
+
+const app = new Hono<Env>();
+app.use('/api/*', bearerAuth);
+app.use('/api/admin/*', requireRole('admin'));
+
+app.get('/api/me', (c) => c.json({ userId: c.get('userId') }));
+
+export default app;","import { Hono } from 'hono';
+
+const app = new Hono();
+
+app.get('/api/me', async (c) => {
+  const auth = c.req.header('Authorization');
+  if (!auth) return c.json({ error: 'No auth' }, 401);
+  const token = auth.split(' ')[1];
+  const user = await verifyJwt(token);
+  if (!user) return c.json({ error: 'Bad token' }, 401);
+  return c.json({ userId: user.sub });
+});
+
+app.get('/api/settings', async (c) => {
+  const auth = c.req.header('Authorization');
+  if (!auth) return c.json({ error: 'No auth' }, 401);
+  const token = auth.split(' ')[1];
+  const user = await verifyJwt(token);
+  if (!user) return c.json({ error: 'Bad token' }, 401);
+  // duplicated auth logic in every handler
+  return c.json({ settings: {} });
+});
+
+export default app;",error,https://hono.dev/docs/middleware/builtin/bearer-auth
+9,CORS,"Configure CORS middleware properly","Use Hono's built-in cors() middleware with explicit origin configuration. Never use wildcard origins in production.","Specify exact allowed origins and configure methods, headers, and credentials explicitly","Don't use wildcard '*' origin in production or skip CORS configuration entirely","import { Hono } from 'hono';
+import { cors } from 'hono/cors';
+
+const app = new Hono();
+
+app.use(
+  '/api/*',
+  cors({
+    origin: ['https://myapp.com', 'https://staging.myapp.com'],
+    allowMethods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH'],
+    allowHeaders: ['Content-Type', 'Authorization'],
+    exposeHeaders: ['X-Request-Id', 'X-Total-Count'],
+    credentials: true,
+    maxAge: 86400,
+  })
+);
+
+// Dynamic origin for multi-tenant
+app.use(
+  '/tenant/*',
+  cors({
+    origin: (origin) => {
+      if (origin.endsWith('.myapp.com')) {
+        return origin;
+      }
+      return 'https://myapp.com';
+    },
+  })
+);
+
+export default app;","import { Hono } from 'hono';
+import { cors } from 'hono/cors';
+
+const app = new Hono();
+
+// Wide open CORS - security risk in production
+app.use('*', cors());
+
+// Or manual headers missing preflight handling
+app.use('*', async (c, next) => {
+  c.header('Access-Control-Allow-Origin', '*');
+  await next();
+});
+
+export default app;",error,https://hono.dev/docs/middleware/builtin/cors
+10,JWT,"Use hono/jwt middleware for JWT operations","Use the built-in jwt() middleware from hono/jwt for token verification. Use sign() and verify() helpers for token creation and manual verification.","Use the jwt() middleware for route protection and sign()/verify() for token creation","Don't implement JWT parsing manually or use unverified token data","import { Hono } from 'hono';
+import { jwt, sign, verify } from 'hono/jwt';
+import type { JwtVariables } from 'hono/jwt';
+
+type Env = {
+  Bindings: { JWT_SECRET: string };
+  Variables: JwtVariables;
+};
+
+const app = new Hono<Env>();
+
+// Protect routes with jwt() middleware
+app.use('/api/*', (c, next) => {
+  const jwtMiddleware = jwt({ secret: c.env.JWT_SECRET });
+  return jwtMiddleware(c, next);
+});
+
+// Access decoded payload
+app.get('/api/me', (c) => {
+  const payload = c.get('jwtPayload');
+  return c.json({ userId: payload.sub, role: payload.role });
+});
+
+// Issue tokens
+app.post('/auth/login', async (c) => {
+  const { email, password } = await c.req.json();
+  const user = await authenticateUser(email, password);
+
+  const token = await sign(
+    { sub: user.id, role: user.role, exp: Math.floor(Date.now() / 1000) + 3600 },
+    c.env.JWT_SECRET
+  );
+
+  return c.json({ token });
+});
+
+export default app;","import { Hono } from 'hono';
+
+const app = new Hono();
+
+app.get('/api/me', async (c) => {
+  const token = c.req.header('Authorization')?.split(' ')[1];
+  // Manually decoding without verification - security flaw
+  const payload = JSON.parse(atob(token!.split('.')[1]));
+  return c.json({ userId: payload.sub });
+});
+
+export default app;",error,https://hono.dev/docs/middleware/builtin/jwt
+11,Cookie,"Use getCookie/setCookie helpers for cookie management","Hono provides getCookie, setCookie, and deleteCookie helpers for safe cookie management with proper serialization and security attributes.","Use getCookie/setCookie with explicit security attributes (httpOnly, secure, sameSite)","Don't parse cookies manually from headers or set cookies without security attributes","import { Hono } from 'hono';
+import { getCookie, setCookie, deleteCookie } from 'hono/cookie';
+
+const app = new Hono();
+
+app.post('/auth/login', async (c) => {
+  const { email, password } = await c.req.json();
+  const session = await createSession(email, password);
+
+  setCookie(c, 'session_id', session.id, {
+    path: '/',
+    httpOnly: true,
+    secure: true,
+    sameSite: 'Lax',
+    maxAge: 60 * 60 * 24 * 7, // 7 days
+  });
+
+  return c.json({ success: true });
+});
+
+app.get('/api/me', async (c) => {
+  const sessionId = getCookie(c, 'session_id');
+  if (!sessionId) {
+    return c.json({ error: 'Not authenticated' }, 401);
+  }
+  const user = await getSessionUser(sessionId);
+  return c.json({ user });
+});
+
+app.post('/auth/logout', (c) => {
+  deleteCookie(c, 'session_id', { path: '/' });
+  return c.json({ success: true });
+});
+
+export default app;","import { Hono } from 'hono';
+
+const app = new Hono();
+
+app.post('/auth/login', async (c) => {
+  const session = await createSession();
+
+  // Manual cookie header - error-prone, missing security attrs
+  c.header('Set-Cookie', `session_id=${session.id}; Path=/`);
+
+  return c.json({ success: true });
+});
+
+app.get('/api/me', async (c) => {
+  // Manual cookie parsing - fragile
+  const cookies = c.req.header('Cookie') || '';
+  const sessionId = cookies.split(';')
+    .find((c) => c.trim().startsWith('session_id='))
+    ?.split('=')[1];
+  return c.json({ sessionId });
+});
+
+export default app;",warning,https://hono.dev/docs/helpers/cookie
+12,Static Files,"Configure serveStatic middleware for static assets","Use the serveStatic middleware to serve static files. Configure the root directory and set proper caching headers for production.","Use serveStatic with appropriate root and rewriteRequestPath for static assets","Don't read files manually from disk and send them as responses","import { Hono } from 'hono';
+import { serveStatic } from 'hono/bun'; // or hono/cloudflare-workers
+
+const app = new Hono();
+
+// Serve static files from ./public directory
+app.use('/static/*', serveStatic({ root: './public' }));
+
+// Serve with custom headers for caching
+app.use(
+  '/assets/*',
+  serveStatic({
+    root: './dist/assets',
+    rewriteRequestPath: (path) => path.replace(/^\/assets/, ''),
+    onFound: (_path, c) => {
+      c.header('Cache-Control', 'public, max-age=31536000, immutable');
+    },
+    onNotFound: (path, c) => {
+      console.log(`Static file not found: ${path}`);
+    },
+  })
+);
+
+// SPA fallback
+app.get('*', serveStatic({ root: './dist', path: '/index.html' }));
+
+export default app;","import { Hono } from 'hono';
+import { readFileSync } from 'fs';
+import { join } from 'path';
+
+const app = new Hono();
+
+app.get('/static/:file', (c) => {
+  const file = c.req.param('file');
+  // Security risk: path traversal, no MIME types, no caching
+  const content = readFileSync(join('./public', file));
+  return new Response(content);
+});
+
+export default app;",warning,https://hono.dev/docs/middleware/builtin/serve-static
+13,HTML Response,"Use the html template helper for HTML responses","Hono's html tagged template literal provides XSS-safe HTML rendering with automatic escaping of interpolated values.","Use the html`` tagged template with raw() only for trusted pre-sanitized content","Don't concatenate HTML strings manually with unescaped user input","import { Hono } from 'hono';
+import { html, raw } from 'hono/html';
+
+const app = new Hono();
+
+const layout = (title: string, content: string) => html`
+  <!DOCTYPE html>
+  <html lang=""en"">
+    <head>
+      <meta charset=""UTF-8"" />
+      <title>${title}</title>
+    </head>
+    <body>
+      ${raw(content)}
+    </body>
+  </html>
+`;
+
+app.get('/page/:name', (c) => {
+  const name = c.req.param('name'); // auto-escaped in template
+  const page = layout(
+    `Page: ${name}`,
+    '<main><h1>Welcome</h1></main>'
+  );
+  return c.html(page);
+});
+
+app.get('/greeting', (c) => {
+  const userInput = c.req.query('name') ?? 'World';
+  // userInput is auto-escaped, preventing XSS
+  return c.html(html`<h1>Hello, ${userInput}!</h1>`);
+});
+
+export default app;","import { Hono } from 'hono';
+
+const app = new Hono();
+
+app.get('/greeting', (c) => {
+  const name = c.req.query('name') ?? 'World';
+  // XSS vulnerability: unescaped user input in HTML
+  return c.html(`<h1>Hello, ${name}!</h1>`);
+});
+
+export default app;",error,https://hono.dev/docs/helpers/html
+14,Streaming,"Use c.stream() and c.streamText() for streaming responses","Hono provides streaming helpers for sending chunked responses, useful for server-sent events, large data, and AI chat responses.","Use c.streamText() for SSE-like streaming and c.stream() for binary streaming with proper abort handling","Don't buffer entire large responses in memory before sending","import { Hono } from 'hono';
+import { streamText, streamSSE } from 'hono/streaming';
+
+const app = new Hono();
+
+// Stream text response (e.g., AI chat)
+app.post('/api/chat', (c) => {
+  return streamText(c, async (stream) => {
+    for await (const chunk of generateAIResponse(c.req)) {
+      await stream.write(chunk);
+    }
+  });
+});
+
+// Server-Sent Events
+app.get('/api/events', (c) => {
+  return streamSSE(c, async (stream) => {
+    let id = 0;
+    while (true) {
+      const event = await getNextEvent();
+      await stream.writeSSE({
+        data: JSON.stringify(event),
+        event: 'message',
+        id: String(id++),
+      });
+      await stream.sleep(1000);
+    }
+  });
+});
+
+// Binary stream
+app.get('/api/download/:file', (c) => {
+  const { stream: fileStream, size } = getFileStream(c.req.param('file'));
+  c.header('Content-Length', String(size));
+  c.header('Content-Type', 'application/octet-stream');
+
+  return c.stream(async (stream) => {
+    await stream.pipe(fileStream);
+  });
+});
+
+export default app;","import { Hono } from 'hono';
+
+const app = new Hono();
+
+// Buffering entire response in memory - bad for large data
+app.get('/api/download/:file', async (c) => {
+  const data = await readEntireFileIntoMemory(c.req.param('file'));
+  return new Response(data);
+});
+
+// No proper SSE format
+app.get('/api/events', async (c) => {
+  const events = await getAllEvents();
+  return c.json(events); // not streaming, loads all into memory
+});
+
+export default app;",warning,https://hono.dev/docs/helpers/streaming
+15,WebSocket,"Use upgradeWebSocket for WebSocket handlers","Hono provides upgradeWebSocket() to handle WebSocket connections with typed message handling and proper lifecycle events.","Use upgradeWebSocket with onMessage, onOpen, onClose, and onError handlers","Don't manually upgrade connections or handle WebSocket protocol details yourself","import { Hono } from 'hono';
+import { upgradeWebSocket } from 'hono/cloudflare-workers'; // or hono/bun
+
+const app = new Hono();
+
+const wsRoute = app.get(
+  '/ws',
+  upgradeWebSocket((c) => {
+    const connections = new Set<WebSocket>();
+
+    return {
+      onOpen(event, ws) {
+        console.log('Client connected');
+        ws.send(JSON.stringify({ type: 'connected', timestamp: Date.now() }));
+      },
+      onMessage(event, ws) {
+        const data = JSON.parse(event.data as string);
+
+        switch (data.type) {
+          case 'ping':
+            ws.send(JSON.stringify({ type: 'pong' }));
+            break;
+          case 'broadcast':
+            // Handle broadcast logic
+            ws.send(JSON.stringify({ type: 'ack', id: data.id }));
+            break;
+        }
+      },
+      onClose(event, ws) {
+        console.log('Client disconnected', event.code, event.reason);
+      },
+      onError(event, ws) {
+        console.error('WebSocket error:', event);
+      },
+    };
+  })
+);
+
+export default app;","import { Hono } from 'hono';
+
+const app = new Hono();
+
+// Manual WebSocket upgrade - non-portable, error-prone
+app.get('/ws', async (c) => {
+  const upgradeHeader = c.req.header('Upgrade');
+  if (upgradeHeader !== 'websocket') {
+    return c.text('Expected WebSocket', 426);
+  }
+  // Platform-specific manual upgrade code...
+  // This won't work across different runtimes
+});
+
+export default app;",warning,https://hono.dev/docs/helpers/websocket
+16,Testing,"Use app.request() for integration testing","Hono's app.request() method allows testing handlers without starting a server. It supports full request options and returns a standard Response.","Use app.request() with proper assertions on status, headers, and JSON body","Don't start an actual HTTP server for unit tests or test handlers in isolation without the middleware chain","import { describe, it, expect } from 'vitest';
+import app from './app';
+
+describe('User API', () => {
+  it('should return users list', async () => {
+    const res = await app.request('/api/users?page=1&limit=10');
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body).toHaveProperty('users');
+    expect(body.users).toBeInstanceOf(Array);
+  });
+
+  it('should create a user', async () => {
+    const res = await app.request('/api/users', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer test-token',
+      },
+      body: JSON.stringify({
+        name: 'Alice',
+        email: 'alice@example.com',
+      }),
+    });
+
+    expect(res.status).toBe(201);
+    const body = await res.json();
+    expect(body.user.name).toBe('Alice');
+  });
+
+  it('should return 404 for unknown user', async () => {
+    const res = await app.request('/api/users/unknown-id', {
+      headers: { 'Authorization': 'Bearer test-token' },
+    });
+
+    expect(res.status).toBe(404);
+  });
+});","import { describe, it, expect } from 'vitest';
+
+// Testing handlers as plain functions without middleware
+describe('User API', () => {
+  it('should return users', async () => {
+    // Creating mock context objects manually - fragile
+    const mockCtx = {
+      req: { query: () => ({}) },
+      json: (data: any) => data,
+    };
+
+    const result = await getUsersHandler(mockCtx as any);
+    expect(result).toBeDefined();
+  });
+});",warning,https://hono.dev/docs/guides/testing
+17,Edge Runtime,"Deploy to Cloudflare Workers with proper bindings","When deploying Hono to Cloudflare Workers, use typed Bindings for environment variables, KV, D1, and other Worker bindings.","Define Bindings type for all Cloudflare resources and use wrangler types for auto-generation","Don't access bindings without type definitions or use process.env in Workers","import { Hono } from 'hono';
+
+type Env = {
+  Bindings: {
+    DB: D1Database;
+    KV: KVNamespace;
+    BUCKET: R2Bucket;
+    API_KEY: string;
+  };
+};
+
+const app = new Hono<Env>();
+
+app.get('/api/users', async (c) => {
+  const { results } = await c.env.DB
+    .prepare('SELECT id, name, email FROM users LIMIT ?')
+    .bind(20)
+    .all();
+  return c.json({ users: results });
+});
+
+app.get('/api/cache/:key', async (c) => {
+  const key = c.req.param('key');
+  const value = await c.env.KV.get(key);
+  if (!value) {
+    return c.json({ error: 'Key not found' }, 404);
+  }
+  return c.json({ key, value });
+});
+
+export default app;
+
+// wrangler.toml
+// [[d1_databases]]
+// binding = ""DB""
+// database_name = ""my-db""
+// database_id = ""xxx""","import { Hono } from 'hono';
+
+const app = new Hono();
+
+app.get('/api/users', async (c) => {
+  // process.env doesn't exist in Workers runtime
+  const apiKey = process.env.API_KEY;
+
+  // Accessing bindings without types
+  const db = (c.env as any).DB;
+  const results = await db.prepare('SELECT * FROM users').all();
+
+  return c.json({ users: results });
+});
+
+export default app;",error,https://hono.dev/docs/getting-started/cloudflare-workers
+18,Bun Runtime,"Integrate Hono with Bun.serve","When using Hono with Bun, export the app directly or use Bun.serve() for advanced configuration like WebSocket handling and custom port binding.","Export default app for simple cases or use Bun.serve with fetch: app.fetch for advanced setup","Don't use Node.js-specific APIs or start the server with app.listen()","import { Hono } from 'hono';
+import { serveStatic } from 'hono/bun';
+
+const app = new Hono();
+
+app.use('/static/*', serveStatic({ root: './public' }));
+
+app.get('/', (c) => c.text('Hello from Bun!'));
+
+// Simple: just export default
+export default app;
+
+// Advanced: use Bun.serve for more control
+// Bun.serve({
+//   port: Number(process.env.PORT) || 3000,
+//   fetch: app.fetch,
+//   websocket: {
+//     message(ws, message) { /* handle WS */ },
+//     open(ws) { /* handle open */ },
+//   },
+//   tls: {
+//     cert: Bun.file('./cert.pem'),
+//     key: Bun.file('./key.pem'),
+//   },
+// });","import { Hono } from 'hono';
+
+const app = new Hono();
+
+app.get('/', (c) => c.text('Hello'));
+
+// Wrong: app.listen doesn't exist on Hono
+app.listen(3000);
+
+// Wrong: Using Node.js http module with Bun
+import { createServer } from 'http';
+createServer(app).listen(3000);",error,https://hono.dev/docs/getting-started/bun
+19,Node.js Adapter,"Use @hono/node-server for Node.js deployment","When running Hono on Node.js, use the @hono/node-server adapter which provides a proper HTTP server with Node.js compatibility.","Use serve() from @hono/node-server with proper host and port configuration","Don't try to use Hono's default export with Node.js or mix Node.js http module incorrectly","import { Hono } from 'hono';
+import { serve } from '@hono/node-server';
+import { serveStatic } from '@hono/node-server/serve-static';
+
+const app = new Hono();
+
+app.use('/static/*', serveStatic({ root: './public' }));
+
+app.get('/', (c) => c.text('Hello from Node.js!'));
+
+app.get('/api/health', (c) => {
+  return c.json({
+    status: 'ok',
+    runtime: 'node',
+    uptime: process.uptime(),
+    memory: process.memoryUsage(),
+  });
+});
+
+const port = Number(process.env.PORT) || 3000;
+
+serve(
+  {
+    fetch: app.fetch,
+    port,
+    hostname: '0.0.0.0',
+  },
+  (info) => {
+    console.log(`Server running at http://${info.address}:${info.port}`);
+  }
+);","import { Hono } from 'hono';
+import { createServer } from 'http';
+
+const app = new Hono();
+app.get('/', (c) => c.text('Hello'));
+
+// Wrong: Hono app is not a Node.js request handler
+createServer(app).listen(3000);
+
+// Also wrong: export default doesn't work in Node.js
+export default app;",error,https://hono.dev/docs/getting-started/nodejs
+20,RPC Client,"Use hc<AppType> for type-safe API clients","Hono RPC allows you to create a fully type-safe client from your server routes. The client infers request/response types from your route definitions.","Export the app type and use hc<AppType> to create typed API clients","Don't write manual fetch calls without type safety or duplicate type definitions","// server.ts
+import { Hono } from 'hono';
+import { zValidator } from '@hono/zod-validator';
+import { z } from 'zod';
+
+const app = new Hono()
+  .get('/api/users', (c) => {
+    return c.json({ users: [{ id: '1', name: 'Alice' }] });
+  })
+  .post(
+    '/api/users',
+    zValidator('json', z.object({ name: z.string(), email: z.string().email() })),
+    (c) => {
+      const data = c.req.valid('json');
+      return c.json({ user: { id: '2', ...data } }, 201);
+    }
+  )
+  .get('/api/users/:id', (c) => {
+    return c.json({ user: { id: c.req.param('id'), name: 'Alice' } });
+  });
+
+export type AppType = typeof app;
+export default app;
+
+// client.ts
+import { hc } from 'hono/client';
+import type { AppType } from './server';
+
+const client = hc<AppType>('http://localhost:3000');
+
+const res = await client.api.users.$get();
+const { users } = await res.json(); // fully typed
+
+const createRes = await client.api.users.$post({
+  json: { name: 'Bob', email: 'bob@example.com' }, // type-checked
+});","// client.ts - no type safety
+const res = await fetch('http://localhost:3000/api/users');
+const data: any = await res.json(); // untyped
+
+const createRes = await fetch('http://localhost:3000/api/users', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ name: 'Bob' }), // missing email, no type error
+});",warning,https://hono.dev/docs/guides/rpc
+21,OpenAPI,"Use @hono/zod-openapi for API documentation","Use @hono/zod-openapi to define routes with Zod schemas that automatically generate OpenAPI 3.0 documentation alongside validation.","Use createRoute() with OpenAPI metadata and register with OpenAPIHono","Don't maintain OpenAPI specs manually or use separate schema definitions from validation","import { OpenAPIHono, createRoute, z } from '@hono/zod-openapi';
+
+const UserSchema = z
+  .object({
+    id: z.string().openapi({ example: 'user_123' }),
+    name: z.string().openapi({ example: 'Alice' }),
+    email: z.string().email().openapi({ example: 'alice@example.com' }),
+  })
+  .openapi('User');
+
+const CreateUserSchema = z
+  .object({
+    name: z.string().min(1).max(100),
+    email: z.string().email(),
+  })
+  .openapi('CreateUser');
+
+const createUserRoute = createRoute({
+  method: 'post',
+  path: '/api/users',
+  tags: ['Users'],
+  summary: 'Create a new user',
+  request: {
+    body: {
+      content: { 'application/json': { schema: CreateUserSchema } },
+    },
+  },
+  responses: {
+    201: {
+      description: 'User created',
+      content: { 'application/json': { schema: UserSchema } },
+    },
+  },
+});
+
+const app = new OpenAPIHono();
+
+app.openapi(createUserRoute, async (c) => {
+  const data = c.req.valid('json'); // typed from schema
+  return c.json({ id: 'user_123', ...data }, 201);
+});
+
+app.doc('/doc', { openapi: '3.0.0', info: { title: 'My API', version: '1.0.0' } });
+app.get('/swagger', (c) => c.html(`<html><body><div id=""swagger""></div></body></html>`));
+
+export default app;","import { Hono } from 'hono';
+
+const app = new Hono();
+
+// Maintaining separate openapi.yaml manually
+// Validation and docs are disconnected - they drift apart
+app.post('/api/users', async (c) => {
+  const body = await c.req.json();
+  // Manual validation, no OpenAPI metadata
+  if (!body.name) return c.json({ error: 'name required' }, 400);
+  return c.json({ id: '123', ...body }, 201);
+});
+
+export default app;",warning,https://hono.dev/docs/guides/openapi
+22,TypeScript Types,"Leverage Hono's Env generic for full type safety","Define Env with Bindings (platform environment variables), Variables (request-scoped state), and use TypedResponse for response type narrowing.","Define comprehensive Env types with Bindings and Variables for end-to-end type safety","Don't use 'any' casts or ignore Hono's type system","import { Hono } from 'hono';
+import type { MiddlewareHandler } from 'hono';
+
+// Define comprehensive environment types
+type AppEnv = {
+  Bindings: {
+    DATABASE_URL: string;
+    REDIS_URL: string;
+    JWT_SECRET: string;
+    NODE_ENV: 'development' | 'staging' | 'production';
+  };
+  Variables: {
+    user: {
+      id: string;
+      email: string;
+      role: 'admin' | 'editor' | 'viewer';
+    };
+    requestId: string;
+    db: DatabaseClient;
+  };
+};
+
+// Middleware with proper typing
+const withDb: MiddlewareHandler<AppEnv> = async (c, next) => {
+  const db = createDbClient(c.env.DATABASE_URL);
+  c.set('db', db);
+  await next();
+  await db.disconnect();
+};
+
+const app = new Hono<AppEnv>();
+
+app.use('*', withDb);
+
+app.get('/api/users', async (c) => {
+  const db = c.get('db'); // typed as DatabaseClient
+  const env = c.env.NODE_ENV; // typed as union
+  const user = c.get('user'); // typed with role union
+  return c.json({ env, userId: user.id });
+});
+
+export default app;","import { Hono } from 'hono';
+
+const app = new Hono();
+
+app.use('*', async (c: any, next: any) => {
+  // Using 'any' everywhere loses all type safety
+  const db = createDbClient((c.env as any).DATABASE_URL);
+  (c as any).db = db;
+  await next();
+});
+
+app.get('/api/users', async (c: any) => {
+  const db = (c as any).db;
+  return c.json({ users: await db.query('SELECT * FROM users') });
+});
+
+export default app;",error,https://hono.dev/docs/api/hono#generics
+23,Middleware Composition,"Compose multiple middlewares for route groups","Chain multiple middleware functions for a route using app.use() or inline in route definitions. Order matters - middlewares execute in registration order.","Chain middlewares explicitly and keep each middleware focused on a single responsibility","Don't create monolithic middleware that handles multiple concerns or rely on implicit ordering","import { Hono } from 'hono';
+import { cors } from 'hono/cors';
+import { logger } from 'hono/logger';
+import { compress } from 'hono/compress';
+import { timing, startTime, endTime } from 'hono/timing';
+import type { MiddlewareHandler } from 'hono';
+
+type Env = {
+  Variables: {
+    userId: string;
+    permissions: string[];
+  };
+};
+
+const authenticate: MiddlewareHandler<Env> = async (c, next) => {
+  const token = c.req.header('Authorization')?.replace('Bearer ', '');
+  if (!token) throw new HTTPException(401, { message: 'Unauthorized' });
+  const payload = await verifyToken(token);
+  c.set('userId', payload.sub);
+  await next();
+};
+
+const authorize = (...requiredPerms: string[]): MiddlewareHandler<Env> => {
+  return async (c, next) => {
+    const perms = c.get('permissions');
+    const hasAll = requiredPerms.every((p) => perms.includes(p));
+    if (!hasAll) throw new HTTPException(403, { message: 'Forbidden' });
+    await next();
+  };
+};
+
+const app = new Hono<Env>();
+
+// Global middlewares
+app.use('*', logger(), compress(), timing());
+app.use('/api/*', cors({ origin: 'https://myapp.com' }));
+
+// Route-specific middleware chains
+app.use('/api/*', authenticate);
+
+app.get('/api/admin/users', authorize('users:read'), (c) => {
+  return c.json({ users: [] });
+});
+
+app.delete('/api/admin/users/:id', authorize('users:delete'), (c) => {
+  return c.json({ deleted: c.req.param('id') });
+});
+
+export default app;","import { Hono } from 'hono';
+
+const app = new Hono();
+
+// Monolithic middleware doing everything
+app.use('*', async (c, next) => {
+  // Logging
+  console.log(c.req.method, c.req.path);
+  // CORS
+  c.header('Access-Control-Allow-Origin', '*');
+  // Auth
+  const token = c.req.header('Authorization');
+  if (c.req.path.startsWith('/api') && !token) {
+    return c.json({ error: 'Unauthorized' }, 401);
+  }
+  // Compression logic mixed in...
+  await next();
+});
+
+export default app;",warning,https://hono.dev/docs/guides/middleware
+24,File Upload,"Use parseBody for multipart form data uploads","Hono's c.req.parseBody() handles multipart/form-data for file uploads. Access uploaded files as File objects with metadata.","Use c.req.parseBody() with the all option for multiple files and validate file types and sizes","Don't use c.req.json() for multipart data or skip file validation","import { Hono } from 'hono';
+import { HTTPException } from 'hono/http-exception';
+
+const app = new Hono();
+
+const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
+const ALLOWED_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
+
+app.post('/api/upload', async (c) => {
+  const body = await c.req.parseBody();
+  const file = body['file'];
+
+  if (!(file instanceof File)) {
+    throw new HTTPException(400, { message: 'No file uploaded' });
+  }
+
+  if (!ALLOWED_TYPES.includes(file.type)) {
+    throw new HTTPException(400, { message: `Invalid file type: ${file.type}` });
+  }
+
+  if (file.size > MAX_FILE_SIZE) {
+    throw new HTTPException(400, { message: 'File too large (max 10MB)' });
+  }
+
+  const buffer = await file.arrayBuffer();
+  const path = await saveFile(file.name, buffer);
+
+  return c.json({ path, size: file.size, type: file.type }, 201);
+});
+
+// Multiple files
+app.post('/api/upload-multiple', async (c) => {
+  const body = await c.req.parseBody({ all: true });
+  const files = body['files'];
+
+  if (!Array.isArray(files)) {
+    throw new HTTPException(400, { message: 'Expected multiple files' });
+  }
+
+  const results = await Promise.all(
+    files.filter((f): f is File => f instanceof File).map(async (file) => {
+      const buffer = await file.arrayBuffer();
+      return saveFile(file.name, buffer);
+    })
+  );
+
+  return c.json({ uploaded: results }, 201);
+});
+
+export default app;","import { Hono } from 'hono';
+
+const app = new Hono();
+
+app.post('/api/upload', async (c) => {
+  // Wrong: c.req.json() doesn't handle multipart
+  const body = await c.req.json();
+
+  // No file type validation
+  // No file size validation
+  // Directly saving without checks
+  await saveFile(body.filename, body.data);
+
+  return c.json({ success: true });
+});
+
+export default app;",error,https://hono.dev/docs/api/request#parsebody
+25,Production Deployment,"Configure production deployment for multiple runtimes","Hono runs on Node.js, Bun, Cloudflare Workers, and Deno. Configure each runtime with proper production settings including graceful shutdown and health checks.","Configure runtime-specific entry points with health checks, graceful shutdown, and proper error handling","Don't use a single unconfigured entry point without health checks or shutdown handling","// entry-node.ts - Node.js production
+import { serve } from '@hono/node-server';
+import app from './app';
+
+const port = Number(process.env.PORT) || 3000;
+
+const server = serve(
+  { fetch: app.fetch, port, hostname: '0.0.0.0' },
+  (info) => {
+    console.log(`Server started on port ${info.port}`);
+  }
+);
+
+const shutdown = () => {
+  console.log('Shutting down gracefully...');
+  server.close(() => {
+    console.log('Server closed');
+    process.exit(0);
+  });
+  setTimeout(() => {
+    console.error('Forced shutdown after timeout');
+    process.exit(1);
+  }, 10_000);
+};
+
+process.on('SIGTERM', shutdown);
+process.on('SIGINT', shutdown);
+
+// entry-bun.ts - Bun production
+// export default {
+//   port: Number(process.env.PORT) || 3000,
+//   fetch: app.fetch,
+// };
+
+// entry-workers.ts - Cloudflare Workers
+// export default app;
+
+// app.ts - shared app with health check
+// app.get('/health', (c) => c.json({
+//   status: 'ok',
+//   uptime: process.uptime?.() ?? 0,
+//   timestamp: new Date().toISOString(),
+// }));","import app from './app';
+
+// No health check endpoint
+// No graceful shutdown
+// Hardcoded port
+// No runtime detection
+
+app.fetch({ method: 'GET', url: '/' }); // This doesn't start a server
+
+// Or:
+import { serve } from '@hono/node-server';
+serve({ fetch: app.fetch, port: 3000 });
+// Process exits immediately on SIGTERM without cleanup",error,https://hono.dev/docs/getting-started/nodejs

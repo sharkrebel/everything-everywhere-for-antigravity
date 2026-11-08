@@ -1,7 +1,7 @@
 {
   "name": "android-cli-plugin",
   "displayName": "Android CLI",
-  "version": "1.0.16500706",
+  "version": "1.0.16625370",
   "description": "Core tools and knowledge required to develop for Android.",
   "logo": "assets/logo.png",
   "suggestedPrompts": [

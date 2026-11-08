@@ -1,0 +1,589 @@
+No,Category,Issue,Keywords,Description,Do,Dont,Code Good,Code Bad,Impact,Measurement
+1,Runtime,Event Loop Blocking,"event loop,blocking,sync,setImmediate,libuv","Synchronous operations such as CPU-heavy computation, synchronous I/O, or large JSON parsing block the single-threaded event loop, preventing all other requests from being processed until the operation completes.","Use async APIs (fs.promises, crypto.randomBytes async), offload CPU work to Worker Threads, break large tasks with setImmediate(), and use streaming for large data.","Never use synchronous APIs in request handlers (fs.readFileSync, crypto.pbkdf2Sync). Never run tight loops or heavy computation on the main thread. Never JSON.parse() massive payloads synchronously.","import { createReadStream } from 'fs';
+
+// Break CPU work into chunks to yield to event loop
+async function processLargeArray(items: string[]): Promise<string[]> {
+  const results: string[] = [];
+  const CHUNK = 1000;
+  for (let i = 0; i < items.length; i += CHUNK) {
+    results.push(...items.slice(i, i + CHUNK).map((s) => s.toUpperCase()));
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  return results;
+}","import { readFileSync } from 'fs';
+import { pbkdf2Sync } from 'crypto';
+
+// BAD: blocks event loop while reading entire file
+function handleRequest(): string {
+  const data = readFileSync('/large-file.json', 'utf8');
+  const hash = pbkdf2Sync('password', 'salt', 100000, 64, 'sha512');
+  return JSON.parse(data).result;
+}",critical,"clinic.js flame, autocannon latency percentiles, process._getActiveRequests().length"
+2,Memory,Memory Leaks from Closures,"closure,memory leak,garbage collection,retain,reference","Closures capture their enclosing scope variables. If a closure is long-lived (e.g., stored in a cache or event handler), it can inadvertently retain large objects that should have been garbage collected, causing memory to grow unboundedly.","Keep closures small and focused. Null out references when no longer needed. Use WeakRef or WeakMap for caches. Extract only needed values from large objects before closing over them.","Do not close over entire request or response objects in long-lived callbacks. Do not store closures that reference large data structures in module-level caches without expiration.","// GOOD: Extract only needed data before closing over it
+function createHandler(config: { dbUrl: string; secret: string }) {
+  const dbUrl = config.dbUrl; // extract only what is needed
+  return async (req: Request): Promise<Response> => {
+    const data = await fetchFromDb(dbUrl);
+    return new Response(JSON.stringify(data));
+  };
+}","// BAD: Closure retains entire large object
+function createHandler(hugeContext: Record<string, unknown>) {
+  // hugeContext (possibly MBs) is retained forever
+  return async (req: Request): Promise<Response> => {
+    const val = hugeContext['key'];
+    return new Response(String(val));
+  };
+}",high,"process.memoryUsage().heapUsed over time, --inspect with Chrome DevTools heap snapshot, clinic.js heapprofile"
+3,Database,N+1 Query Problem,"n+1,query,loop,batch,dataloader","Executing one query per item inside a loop generates N additional queries after the initial list query. For 1000 items this means 1001 round-trips to the database instead of 2, destroying throughput and adding massive latency.","Batch queries with WHERE id IN (...), use DataLoader for automatic batching and deduplication, use JOINs or eager-loading in ORMs (e.g., Prisma include, TypeORM relations).","Never execute a query inside a for/forEach/map loop. Never rely on ORM lazy-loading in list endpoints without explicit eager-loading.","import DataLoader from 'dataloader';
+import { db } from './db';
+
+// GOOD: Batch load users by IDs
+const userLoader = new DataLoader<number, User>(async (ids) => {
+  const users = await db.query('SELECT * FROM users WHERE id = ANY($1)', [ids]);
+  const userMap = new Map(users.map((u: User) => [u.id, u]));
+  return ids.map((id) => userMap.get(id) ?? new Error(`User ${id} not found`));
+});
+
+const user = await userLoader.load(42);","// BAD: N+1 queries in a loop
+const orders = await db.query('SELECT * FROM orders');
+for (const order of orders) {
+  // Executes one query PER order
+  const user = await db.query('SELECT * FROM users WHERE id = $1', [order.userId]);
+  order.user = user;
+}",critical,"pg_stat_statements query count, application-level query counter middleware, clinic.js bubbleprof"
+4,I/O,Stream vs Buffer for Large Files,"stream,buffer,memory,pipeline,backpressure","Loading an entire large file into memory with fs.readFile causes a spike in heap usage proportional to file size. Streaming processes data in small chunks with bounded memory, and pipeline() handles backpressure and error propagation automatically.","Use createReadStream/createWriteStream for files over a few MB. Use stream.pipeline() or stream/promises pipeline for composing transforms. Set appropriate highWaterMark.","Never use fs.readFile or fs.readFileSync for files whose size may exceed available memory. Never ignore backpressure by piping without pipeline().","import { createReadStream, createWriteStream } from 'fs';
+import { pipeline } from 'stream/promises';
+import { createGzip } from 'zlib';
+
+// GOOD: Stream large file with compression
+async function compressFile(src: string, dest: string): Promise<void> {
+  await pipeline(
+    createReadStream(src, { highWaterMark: 64 * 1024 }),
+    createGzip(),
+    createWriteStream(dest),
+  );
+}","import { readFileSync, writeFileSync } from 'fs';
+import { gzipSync } from 'zlib';
+
+// BAD: Loads entire file into memory
+function compressFile(src: string, dest: string): void {
+  const data = readFileSync(src);
+  const compressed = gzipSync(data);
+  writeFileSync(dest, compressed);
+}",critical,"process.memoryUsage().rss during file ops, --max-old-space-size threshold testing, clinic.js heap"
+5,Database,Connection Pooling,"pool,connection,database,pg,mysql","Creating a new database connection for each query incurs TCP handshake, TLS negotiation, and authentication overhead on every request. A connection pool maintains a set of reusable connections, dramatically reducing latency and resource consumption.","Configure a pool with min/max connections, idle timeout, and connection timeout. Use pool.query() or acquire/release patterns. Size the pool to match expected concurrency (typically 5-20 per process).","Never create a new Client per request. Never leave connections unreleased (always use try/finally or the pool.query shorthand). Never set pool size larger than what the database can handle.","import { Pool } from 'pg';
+
+const pool = new Pool({
+  host: process.env.DB_HOST,
+  database: process.env.DB_NAME,
+  max: 20,
+  idleTimeoutMillis: 30000,
+  connectionTimeoutMillis: 5000,
+});
+
+// GOOD: Pool manages connection lifecycle
+async function getUser(id: number): Promise<User> {
+  const { rows } = await pool.query('SELECT * FROM users WHERE id = $1', [id]);
+  return rows[0];
+}","import { Client } from 'pg';
+
+// BAD: New connection per request
+async function getUser(id: number): Promise<User> {
+  const client = new Client({ host: 'localhost', database: 'mydb' });
+  await client.connect();
+  const { rows } = await client.query('SELECT * FROM users WHERE id = $1', [id]);
+  await client.end();
+  return rows[0];
+}",critical,"pool.totalCount and pool.waitingCount metrics, pg_stat_activity in PostgreSQL, avg query latency"
+6,Caching,Caching Strategies (Redis),"cache,redis,ttl,invalidation,memoize","Repeatedly fetching the same data from a database or external API wastes I/O and increases latency. An in-memory or distributed cache (Redis) stores computed results with a TTL, serving subsequent requests in microseconds instead of milliseconds.","Use Redis or ioredis for distributed caching. Set appropriate TTL values. Implement cache-aside (lazy loading) pattern. Use cache key namespacing. Invalidate on writes.","Never cache without a TTL (leads to stale data forever). Never cache user-specific sensitive data without proper scoping. Never assume cache is always available (implement fallback).","import Redis from 'ioredis';
+
+const redis = new Redis({ host: 'localhost', port: 6379 });
+
+async function getCachedUser(id: number): Promise<User> {
+  const cacheKey = `user:${id}`;
+  const cached = await redis.get(cacheKey);
+  if (cached) return JSON.parse(cached);
+  const user = await db.query('SELECT * FROM users WHERE id = $1', [id]);
+  await redis.setex(cacheKey, 3600, JSON.stringify(user));
+  return user;
+}","// BAD: No caching, hits DB every time
+async function getUser(id: number): Promise<User> {
+  // Called thousands of times per minute for popular users
+  const user = await db.query('SELECT * FROM users WHERE id = $1', [id]);
+  return user;
+}
+
+// BAD: Cache without TTL
+const cache = new Map<string, User>();",high,"cache hit ratio (hits / (hits + misses)), redis INFO stats, p99 latency comparison cached vs uncached"
+7,Runtime,JSON Serialization Performance,"json,stringify,serialize,fast-json-stringify,schema","JSON.stringify is a generic serializer that must inspect every property at runtime. fast-json-stringify uses a JSON Schema to generate a specialized serializer function, achieving 2-5x faster serialization for known object shapes.","Use fast-json-stringify for hot-path serialization (API responses, logging). Define JSON schemas for response types. Benchmark with realistic payloads. Use in Fastify route schemas for automatic optimization.","Do not use fast-json-stringify for dynamic or unknown shapes. Do not forget to handle edge cases like undefined or circular references in schemas.","import fastJson from 'fast-json-stringify';
+
+interface UserResponse {
+  id: number;
+  name: string;
+  email: string;
+}
+
+const stringifyUser = fastJson({
+  type: 'object',
+  properties: {
+    id: { type: 'integer' },
+    name: { type: 'string' },
+    email: { type: 'string' },
+  },
+});
+
+// 2-5x faster than JSON.stringify for known shapes
+const json: string = stringifyUser({ id: 1, name: 'Alice', email: 'a@b.com' });","// BAD: Generic serialization on every request
+app.get('/users/:id', (req, res) => {
+  const user = getUserById(Number(req.params.id));
+  // JSON.stringify inspects every property at runtime
+  res.setHeader('Content-Type', 'application/json');
+  res.end(JSON.stringify(user));
+});",medium,"benchmark.js or tinybench comparing stringify throughput, autocannon req/sec difference, clinic.js flame showing stringify CPU time"
+8,Concurrency,Worker Threads for CPU Tasks,"worker_threads,cpu,parallel,offload,thread","Node.js runs JavaScript on a single thread. CPU-intensive tasks (hashing, image processing, data transformation) block this thread, halting all request handling. Worker Threads run JavaScript in parallel OS threads with their own V8 isolates.","Use worker_threads for CPU-bound work exceeding 10-50ms. Use a worker pool (piscina, workerpool) to amortize thread creation cost. Transfer large data with SharedArrayBuffer or transferable objects.","Never create a new Worker per request (thread creation is expensive). Never use workers for I/O-bound tasks (the main thread handles I/O efficiently). Never share mutable state without proper synchronization.","import Piscina from 'piscina';
+import { resolve } from 'path';
+
+const pool = new Piscina({
+  filename: resolve(__dirname, 'hash-worker.ts'),
+  maxThreads: 4,
+});
+
+// GOOD: Offload CPU work to thread pool
+async function hashPassword(password: string): Promise<string> {
+  return pool.run(password);
+}
+
+// hash-worker.ts
+import { scryptSync } from 'crypto';
+export default (password: string): string => scryptSync(password, 'salt', 64).toString('hex');","import { scryptSync } from 'crypto';
+
+// BAD: Blocks main thread for ~100ms per hash
+app.post('/register', (req, res) => {
+  const hash = scryptSync(req.body.password, 'salt', 64);
+  saveUser(req.body.email, hash.toString('hex'));
+  res.json({ ok: true });
+});",critical,"clinic.js flame for main-thread CPU usage, event loop utilization (perf_hooks monitorEventLoopDelay), autocannon latency under load"
+9,Scaling,Cluster Mode,"cluster,multi-process,fork,load balance,core","A single Node.js process uses one CPU core. On multi-core machines most CPU capacity is wasted. The cluster module forks multiple worker processes that share the same server port, with the OS distributing connections across them.","Use cluster or PM2 to spawn one worker per CPU core. Implement graceful shutdown. Use sticky sessions if needed for WebSockets. Monitor individual worker health and restart on crash.","Never share in-memory state across workers (use Redis instead). Never fork more workers than CPU cores. Never ignore unhandled exceptions in workers (implement graceful restart).","import cluster from 'cluster';
+import { cpus } from 'os';
+import { createServer } from 'http';
+
+if (cluster.isPrimary) {
+  const numCPUs = cpus().length;
+  for (let i = 0; i < numCPUs; i++) cluster.fork();
+  cluster.on('exit', (worker) => {
+    console.log(`Worker ${worker.process.pid} died, restarting`);
+    cluster.fork();
+  });
+} else {
+  createServer((req, res) => res.end('OK')).listen(3000);
+}","import { createServer } from 'http';
+
+// BAD: Single process wastes all but one core
+createServer((req, res) => {
+  // All traffic handled by one CPU core
+  const result = computeExpensiveResult();
+  res.end(result);
+}).listen(3000);",high,"autocannon throughput (req/sec) single vs cluster, os.cpus().length vs actual utilization, PM2 monit dashboard"
+10,Startup,Lazy Loading / Dynamic Import,"lazy,dynamic import,startup,code splitting,import()","Importing all modules at startup increases cold-start time significantly, especially in serverless environments. Dynamic import() defers loading until first use, reducing initial memory footprint and time-to-first-response.","Use dynamic import() for rarely used code paths (admin routes, PDF generation, heavy libraries). Lazy-load optional dependencies. Structure code to allow tree-shaking.","Never lazy-load core modules needed on every request (adds latency to first request). Never dynamic-import inside hot loops. Never forget to handle the import() promise rejection.","// GOOD: Load PDF library only when needed
+async function generateReport(data: ReportData): Promise<Buffer> {
+  const { default: PDFDocument } = await import('pdfkit');
+  const doc = new PDFDocument();
+  const chunks: Buffer[] = [];
+  doc.on('data', (chunk: Buffer) => chunks.push(chunk));
+  doc.text(data.title);
+  doc.end();
+  return Buffer.concat(chunks);
+}","import PDFDocument from 'pdfkit';  // 5MB+ loaded at startup
+import sharp from 'sharp';           // heavy native module
+import puppeteer from 'puppeteer';   // massive dependency
+
+// BAD: All heavy modules loaded at startup even if rarely used
+export function generateThumbnail(path: string) {
+  return sharp(path).resize(200).toBuffer();
+}",medium,"node --cpu-prof startup trace, process.hrtime() between process start and server.listen callback, require('module')._cache size"
+11,Network,HTTP Keep-Alive,"keep-alive,connection reuse,agent,tcp,http client","By default Node.js http.Agent creates a new TCP connection for each request to external services. Enabling keep-alive reuses connections, eliminating TCP handshake and TLS negotiation overhead on subsequent requests.","Use http.Agent or https.Agent with keepAlive: true. Set maxSockets and maxFreeSockets appropriately. Use undici for even better performance with HTTP/1.1 connection pooling.","Never create a new Agent per request. Never set maxSockets too low (causes queuing) or too high (overwhelms the target server). Never forget to destroy the agent on process shutdown.","import { Agent } from 'https';
+import { request } from 'undici';
+
+// GOOD: Reuse connections with built-in agent
+const agent = new Agent({
+  keepAlive: true,
+  maxSockets: 50,
+  maxFreeSockets: 10,
+  timeout: 60000,
+});
+
+// Or use undici for superior performance
+async function fetchData(url: string): Promise<unknown> {
+  const { body } = await request(url);
+  return body.json();
+}","import https from 'https';
+
+// BAD: New connection per request (default behavior)
+function fetchData(url: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    https.get(url, { agent: false }, (res) => {
+      let data = '';
+      res.on('data', (chunk) => (data += chunk));
+      res.on('end', () => resolve(data));
+    }).on('error', reject);
+  });
+}",high,"ss -s showing TIME_WAIT connections, autocannon latency to external service, undici diagnostics_channel metrics"
+12,Network,Response Compression (gzip/brotli),"compression,gzip,brotli,transfer,encoding","Uncompressed JSON or HTML responses waste bandwidth and increase transfer times. gzip typically reduces payload size by 70-90%. Brotli achieves 15-20% better compression than gzip at similar speeds for text content.","Use compression middleware (e.g., @fastify/compress, compression for Express). Prefer brotli for static assets and gzip for dynamic responses. Set a minimum size threshold (typically 1KB). Cache compressed responses when possible.","Never compress already-compressed content (images, videos, zip files). Never use highest brotli compression level for dynamic responses (too slow). Never skip the Content-Encoding header.","import Fastify from 'fastify';
+import compress from '@fastify/compress';
+
+const app = Fastify();
+
+await app.register(compress, {
+  global: true,
+  encodings: ['br', 'gzip'],
+  threshold: 1024,
+});
+
+app.get('/data', async () => {
+  return { items: generateLargeDataset() };
+  // Response automatically compressed based on Accept-Encoding
+});","import express from 'express';
+
+const app = express();
+
+// BAD: No compression, sends raw JSON
+app.get('/data', (req, res) => {
+  const data = generateLargeDataset();
+  // 500KB JSON sent uncompressed over the wire
+  res.json(data);
+});",high,"curl -H 'Accept-Encoding: br' -w '%{size_download}' to compare sizes, lighthouse performance audit, network tab transfer vs actual size"
+13,Database,Database Indexing,"index,query plan,explain,btree,compound","Queries without proper indexes force full table scans, reading every row to find matches. An index creates a B-tree or hash structure enabling O(log n) lookups instead of O(n) scans, reducing query time from seconds to milliseconds.","Create indexes on columns used in WHERE, JOIN, ORDER BY, and GROUP BY clauses. Use compound indexes matching query patterns (leftmost prefix rule). Analyze queries with EXPLAIN ANALYZE. Add partial indexes for filtered subsets.","Never create indexes on every column (each index slows writes and consumes storage). Never ignore index maintenance (REINDEX, VACUUM ANALYZE). Never rely solely on ORM auto-generated queries without checking their plans.","import { Pool } from 'pg';
+
+const pool = new Pool();
+
+// GOOD: Query leveraging compound index
+// CREATE INDEX idx_orders_user_status ON orders (user_id, status, created_at DESC);
+async function getUserOrders(userId: number, status: string): Promise<Order[]> {
+  const { rows } = await pool.query(
+    'SELECT id, total, created_at FROM orders WHERE user_id = $1 AND status = $2 ORDER BY created_at DESC LIMIT 20',
+    [userId, status],
+  );
+  return rows;
+}","import { Pool } from 'pg';
+
+const pool = new Pool();
+
+// BAD: No index on (user_id, status) causes full table scan
+async function getUserOrders(userId: number): Promise<Order[]> {
+  const { rows } = await pool.query(
+    'SELECT * FROM orders WHERE user_id = $1 AND status = $2 ORDER BY created_at DESC',
+    [userId, 'active'],
+  );
+  return rows;
+}",critical,"EXPLAIN ANALYZE query execution time and scan type, pg_stat_user_indexes for index usage, pg_stat_user_tables seq_scan vs idx_scan ratio"
+14,Memory,Avoiding Memory Leaks in EventEmitter,"eventemitter,listener,leak,removeListener,maxListeners","Adding event listeners without removing them (e.g., in request handlers or recurring operations) causes listener count to grow unboundedly. Each listener retains a reference to its callback and closure scope, preventing garbage collection.","Always remove listeners when they are no longer needed (removeListener, off, AbortController). Use once() for one-time listeners. Set emitter.setMaxListeners() as a safety net. Use AbortSignal for cleanup.","Never add listeners in a loop or request handler without corresponding removal. Never ignore the MaxListenersExceededWarning (it signals a real leak). Never rely on process exit to clean up listeners.","import { EventEmitter } from 'events';
+
+const emitter = new EventEmitter();
+
+// GOOD: Use once() for single-use listeners
+emitter.once('config-change', (newConfig: Config) => {
+  applyConfig(newConfig);
+});
+
+// GOOD: Use AbortController for cleanup
+function subscribe(emitter: EventEmitter, signal: AbortSignal): void {
+  const handler = (data: unknown) => process(data);
+  emitter.on('data', handler);
+  signal.addEventListener('abort', () => emitter.off('data', handler));
+}","import { EventEmitter } from 'events';
+
+const emitter = new EventEmitter();
+
+// BAD: Adds a new listener on every request, never removed
+app.get('/stream', (req, res) => {
+  emitter.on('update', (data) => {
+    res.write(JSON.stringify(data));
+  });
+  // Listener persists after response ends!
+});",high,"process.memoryUsage().heapUsed over time, emitter.listenerCount('event'), --inspect heap snapshot comparing listener arrays"
+15,Async,Promise.all for Parallel I/O,"promise.all,parallel,concurrent,async,await","Using await sequentially for independent I/O operations means total time equals the sum of all operation durations. Promise.all runs them concurrently, so total time equals only the slowest operation.","Use Promise.all for independent I/O (parallel API calls, parallel DB queries, parallel file reads). Use Promise.allSettled when you need results even if some fail. Limit concurrency with p-limit for large batches.","Never use Promise.all for dependent operations (where one result feeds into the next). Never await in a loop for independent operations. Never Promise.all an unbounded array without concurrency limits.","import pLimit from 'p-limit';
+
+const limit = pLimit(10); // max 10 concurrent
+
+// GOOD: Parallel fetch with concurrency limit
+async function fetchAllUsers(ids: number[]): Promise<User[]> {
+  const tasks = ids.map((id) => limit(() => fetchUser(id)));
+  return Promise.all(tasks);
+}
+
+// GOOD: Parallel independent queries
+async function getDashboard(userId: number) {
+  const [profile, orders, notifications] = await Promise.all([
+    getProfile(userId),
+    getOrders(userId),
+    getNotifications(userId),
+  ]);
+  return { profile, orders, notifications };
+}","// BAD: Sequential await for independent operations
+async function getDashboard(userId: number) {
+  const profile = await getProfile(userId);       // 50ms
+  const orders = await getOrders(userId);          // 80ms
+  const notifications = await getNotifications(userId); // 30ms
+  // Total: 160ms instead of ~80ms
+  return { profile, orders, notifications };
+}",high,"console.time/console.timeEnd around the parallel block, clinic.js bubbleprof showing async gaps, OpenTelemetry span durations"
+16,Observability,Efficient Logging (Pino),"logging,pino,async,console.log,structured","console.log is synchronous and blocks the event loop on every call. In production under high throughput it becomes a significant bottleneck. Pino uses asynchronous writing and low-overhead JSON serialization.","Use pino with pino.destination() for async file or stdout writing. Use structured JSON logging. Set appropriate log levels per environment. Pipe to pino-pretty only in development. Use child loggers for request context.","Never use console.log in production hot paths. Never log entire request/response bodies at info level. Never use synchronous transports (like writing to files with writeFileSync in a custom logger).","import pino from 'pino';
+
+const logger = pino({
+  level: process.env.LOG_LEVEL ?? 'info',
+  transport: process.env.NODE_ENV === 'development'
+    ? { target: 'pino-pretty' }
+    : undefined,
+});
+
+// GOOD: Structured async logging with child context
+app.use((req, res, next) => {
+  req.log = logger.child({ requestId: req.id, method: req.method, url: req.url });
+  req.log.info('request started');
+  next();
+});","// BAD: console.log blocks event loop, unstructured output
+app.use((req, res, next) => {
+  console.log('Request:', req.method, req.url, new Date().toISOString());
+  console.log('Headers:', JSON.stringify(req.headers));
+  console.log('Body:', JSON.stringify(req.body));
+  next();
+});",medium,"autocannon throughput with/without logging, clinic.js flame showing console.log blocking, pino.destination() benchmark vs console"
+17,Protection,Rate Limiting,"rate limit,throttle,ddos,brute force,token bucket","Without rate limiting a single client can exhaust server resources with rapid requests, causing denial of service for all users. Rate limiting caps the number of requests per client per time window.","Use a token bucket or sliding window algorithm. Store counters in Redis for distributed deployments. Apply different limits per endpoint (stricter for auth, looser for reads). Return 429 with Retry-After header.","Never rely solely on in-memory rate limiting in clustered/multi-instance deployments. Never rate limit by IP only behind a shared proxy (use API keys or user IDs). Never set limits so high they provide no protection.","import Fastify from 'fastify';
+import rateLimit from '@fastify/rate-limit';
+
+const app = Fastify();
+
+await app.register(rateLimit, {
+  max: 100,
+  timeWindow: '1 minute',
+  redis: redisClient,
+  keyGenerator: (req) => req.headers['x-api-key'] as string ?? req.ip,
+});
+
+app.get('/api/data', async (req) => {
+  return { data: await fetchData() };
+});","import express from 'express';
+
+const app = express();
+
+// BAD: No rate limiting, vulnerable to abuse
+app.post('/api/login', async (req, res) => {
+  // Attacker can try millions of passwords
+  const result = await authenticate(req.body.email, req.body.password);
+  res.json(result);
+});",high,"redis-cli monitor showing rate limit key operations, 429 response rate in access logs, autocannon testing rate limit boundaries"
+18,Database,Query Optimization (SELECT fields),"select,columns,projection,bandwidth,transfer","SELECT * fetches all columns including large text fields, BLOBs, and unused data. This wastes database I/O, network bandwidth, and application memory. Selecting only needed columns can reduce data transfer by 80%+.","Always specify the exact columns you need. Use TypeScript interfaces to enforce the shape. Create database views for common projections. Use ORMs select/pick methods.","Never use SELECT * in production code. Never fetch BLOB or large TEXT columns unless explicitly needed. Never ignore the cost of serializing and deserializing unused columns.","import { Pool } from 'pg';
+
+const pool = new Pool();
+
+interface UserSummary {
+  id: number;
+  name: string;
+  email: string;
+}
+
+// GOOD: Select only the columns needed for the list view
+async function getUserList(): Promise<UserSummary[]> {
+  const { rows } = await pool.query(
+    'SELECT id, name, email FROM users WHERE active = true ORDER BY name LIMIT 50',
+  );
+  return rows;
+}","import { Pool } from 'pg';
+
+const pool = new Pool();
+
+// BAD: SELECT * fetches bio (TEXT), avatar (BYTEA), metadata (JSONB)
+async function getUserList(): Promise<unknown[]> {
+  const { rows } = await pool.query('SELECT * FROM users WHERE active = true');
+  // Transfers megabytes of unused blob and text data
+  return rows;
+}",medium,"EXPLAIN ANALYZE showing I/O cost difference, network bytes transferred per query, pg_stat_user_tables n_tup_read vs returned"
+19,I/O,Image/Asset Optimization,"image,sharp,cdn,resize,webp,lazy load","Serving unoptimized images (original resolution, uncompressed format) wastes bandwidth and degrades user experience. Processing images on-the-fly without caching wastes CPU. A CDN with optimized variants solves both.","Use sharp for server-side image processing (resize, format conversion to webp/avif). Generate multiple size variants at upload time. Serve through a CDN with proper cache headers. Use lazy loading on the client.","Never process images on every request without caching. Never serve original multi-megabyte uploads directly to clients. Never block the main thread with image processing (use worker threads or a separate service).","import sharp from 'sharp';
+import { resolve } from 'path';
+
+interface ImageVariant {
+  width: number;
+  suffix: string;
+}
+
+const VARIANTS: ImageVariant[] = [
+  { width: 200, suffix: 'thumb' },
+  { width: 800, suffix: 'medium' },
+  { width: 1600, suffix: 'large' },
+];
+
+async function processUpload(inputPath: string, outputDir: string): Promise<void> {
+  await Promise.all(
+    VARIANTS.map((v) =>
+      sharp(inputPath).resize(v.width).webp({ quality: 80 }).toFile(resolve(outputDir, `${v.suffix}.webp`)),
+    ),
+  );
+}","// BAD: Serve original 5MB image, resize on every request
+app.get('/image/:id', async (req, res) => {
+  const original = await fs.readFile(`/uploads/${req.params.id}.png`);
+  const resized = await sharp(original).resize(800).toBuffer();
+  res.type('image/png').send(resized);
+});",medium,"lighthouse image audit score, network transfer size before/after, sharp.cache() statistics, CDN cache hit ratio"
+20,Debugging,Profiling with clinic.js,"clinic,flamegraph,bubbleprof,profiling,bottleneck","Without profiling you are guessing where bottlenecks are. clinic.js provides three tools: Doctor (overall health), Flame (CPU flamegraphs), and Bubbleprof (async flow visualization), each targeting different performance issues.","Run clinic doctor first for an overview. Use clinic flame to identify CPU hotspots. Use clinic bubbleprof for async bottlenecks. Profile under realistic load (use autocannon). Compare before/after profiles.","Never profile in production without understanding the overhead. Never optimize based on gut feeling without profiling data. Never ignore the event loop delay metric from clinic doctor.","import { monitorEventLoopDelay } from 'perf_hooks';
+
+// Programmatic event loop monitoring
+const histogram = monitorEventLoopDelay({ resolution: 20 });
+histogram.enable();
+
+setInterval(() => {
+  console.log({
+    min: histogram.min / 1e6,
+    max: histogram.max / 1e6,
+    mean: histogram.mean / 1e6,
+    p99: histogram.percentile(99) / 1e6,
+  });
+  histogram.reset();
+}, 5000);
+
+// CLI: clinic doctor -- node server.js
+// CLI: clinic flame -- node server.js","// BAD: Guessing at performance issues
+// ""I think the database is slow, let me add caching everywhere""
+// No profiling data, no baseline measurement
+
+app.get('/slow', async (req, res) => {
+  // Add random caching without knowing what is actually slow
+  const cached = cache.get('data');
+  if (cached) return res.json(cached);
+  const data = await getDataThatIsNotActuallyTheProblem();
+  cache.set('data', data, 60);
+  res.json(data);
+});",medium,"clinic doctor summary score, clinic flame CPU time per function, monitorEventLoopDelay p99 values, autocannon latency percentiles"
+21,Memory,Buffer Pooling,"buffer,pool,allocation,reuse,gc","Allocating new Buffers for every operation creates GC pressure. For high-throughput scenarios (network protocols, file processing), reusing pre-allocated buffers from a pool eliminates repeated allocation and garbage collection overhead.","Pre-allocate a pool of buffers for known sizes. Use Buffer.allocUnsafe() when you will fill the entire buffer. Implement acquire/release semantics. Track pool utilization metrics.","Never use Buffer.alloc() in hot paths when you will immediately overwrite the contents (use allocUnsafe). Never forget to release buffers back to the pool. Never share buffers across async boundaries without copying.","class BufferPool {
+  private pool: Buffer[] = [];
+  constructor(private size: number, private prealloc: number) {
+    for (let i = 0; i < prealloc; i++) {
+      this.pool.push(Buffer.allocUnsafe(size));
+    }
+  }
+  acquire(): Buffer {
+    return this.pool.pop() ?? Buffer.allocUnsafe(this.size);
+  }
+  release(buf: Buffer): void {
+    if (buf.length === this.size && this.pool.length < this.prealloc * 2) {
+      this.pool.push(buf);
+    }
+  }
+}
+
+const pool = new BufferPool(4096, 100);","// BAD: Allocate new buffer for every packet
+function handlePacket(data: Uint8Array): Buffer {
+  const buf = Buffer.alloc(4096); // zeroed allocation every time
+  data.forEach((byte, i) => (buf[i] = byte));
+  return buf;
+  // buf becomes garbage immediately after use
+}",medium,"process.memoryUsage().heapUsed stability under load, --trace-gc output frequency, v8.getHeapStatistics() external_memory"
+22,CPU,Avoiding Regex Catastrophic Backtracking,"regex,backtracking,redos,safe,catastrophic","Poorly written regular expressions with nested quantifiers can cause exponential backtracking on certain inputs. An attacker can craft a malicious string that causes a regex to run for minutes or hours, blocking the event loop completely (ReDoS attack).","Use safe-regex or rxxr2 to validate patterns. Prefer atomic groups or possessive quantifiers where supported. Use re2 (Google RE2) for untrusted input, which guarantees linear-time matching. Set timeouts on regex operations.","Never use nested quantifiers like (a+)+ or (a|b+)* on untrusted input. Never assume a regex is safe without testing with adversarial inputs. Never apply complex regex to unbounded input strings.","import RE2 from 're2';
+
+// GOOD: Use RE2 for guaranteed linear-time matching
+const safeEmailRegex = new RE2('^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$');
+
+function validateEmail(input: string): boolean {
+  return safeEmailRegex.test(input);
+}
+
+// GOOD: Bounded input + simple pattern
+function parseLogLine(line: string): string | null {
+  if (line.length > 10000) return null; // bound input
+  const match = /^\[(\d{4}-\d{2}-\d{2})\]/.exec(line);
+  return match?.[1] ?? null;
+}","// BAD: Catastrophic backtracking vulnerability
+const emailRegex = /^([a-zA-Z0-9]+)*@([a-zA-Z0-9]+)*\.([a-zA-Z]+)*$/;
+
+function validateEmail(input: string): boolean {
+  // Attacker sends: 'aaaaaaaaaaaaaaaaaaaaaaaa!'
+  // Regex engine backtracks exponentially
+  return emailRegex.test(input);
+}",critical,"safe-regex npm package check, time regex execution with performance.now(), clinic.js flame showing regex CPU time, re2 benchmark comparison"
+23,Network,HTTP/2 Server Push,"http2,multiplexing,server push,latency,protocol","HTTP/1.1 suffers from head-of-line blocking and requires multiple TCP connections for parallelism. HTTP/2 multiplexes streams over a single connection and supports server push, reducing latency and connection overhead significantly.","Use Node.js built-in http2 module. Enable ALPN negotiation for HTTP/2 with TLS. Use multiplexing for API microservices communication. Configure proper flow control settings.","Never use HTTP/2 server push blindly (browsers are deprecating it). Never assume HTTP/2 is always faster for single small requests. Never forget TLS is essentially required for HTTP/2 in browsers.","import { createSecureServer } from 'http2';
+import { readFileSync } from 'fs';
+
+const server = createSecureServer({
+  key: readFileSync('server.key'),
+  cert: readFileSync('server.crt'),
+  allowHTTP1: true,
+});
+
+server.on('stream', (stream, headers) => {
+  const path = headers[':path'];
+  if (path === '/') {
+    stream.respond({ ':status': 200, 'content-type': 'text/html' });
+    stream.end('<html><script src=""/app.js""></script></html>');
+  } else if (path === '/app.js') {
+    stream.respond({ ':status': 200, 'content-type': 'application/javascript' });
+    stream.end('console.log(""loaded"");');
+  }
+});
+
+server.listen(8443);","import { createServer } from 'http';
+
+// BAD: HTTP/1.1 with head-of-line blocking
+const server = createServer((req, res) => {
+  if (req.url === '/') {
+    res.end('<html><script src=""/app.js""></script></html>');
+  }
+  // Client must wait for HTML, parse, then make separate request for app.js
+});
+
+server.listen(3000);",medium,"h2load benchmarking tool, curl --http2 timing, lighthouse protocol audit, network waterfall comparison in DevTools"
+24,Memory,Object Pooling,"object pool,reuse,allocation,gc pressure,flyweight","Creating and destroying complex objects (database result mappers, parser instances, protocol handlers) on every request creates significant GC pressure. An object pool pre-creates and recycles instances, reducing allocation overhead.","Pool objects that are expensive to create (parsers, formatters, validators). Implement reset() to clear state before reuse. Set pool size limits to bound memory usage. Track hit/miss ratios for tuning.","Never pool trivial objects (plain objects, small arrays). Never forget to reset object state before returning to pool (causes data leaks). Never let pool grow unboundedly.","class ObjectPool<T> {
+  private available: T[] = [];
+  constructor(
+    private factory: () => T,
+    private reset: (obj: T) => void,
+    private maxSize: number = 50,
+  ) {
+    for (let i = 0; i < 10; i++) this.available.push(factory());
+  }
+  acquire(): T {
+    const obj = this.available.pop() ?? this.factory();
+    return obj;
+  }
+  release(obj: T): void {
+    this.reset(obj);
+    if (this.available.length < this.maxSize) this.available.push(obj);
+  }
+}
+
+const parserPool = new ObjectPool(() => new XMLParser(), (p) => p.reset(), 20);","// BAD: Create expensive object on every request
+app.get('/parse', async (req, res) => {
+  const parser = new XMLParser({ /* complex config */ });
+  const result = parser.parse(req.body);
+  // parser is garbage after every request
+  res.json(result);
+});",medium,"v8.getHeapStatistics() total_heap_size stability, --trace-gc log frequency and duration, pool hit/miss ratio logging"
+25,Database,Batching Database Operations,"batch,bulk insert,bulk update,transaction,throughput","Inserting or updating rows one at a time in a loop causes N round-trips to the database. Batching combines many operations into a single query or transaction, reducing network round-trips and enabling database-level optimizations.","Use multi-row INSERT with VALUES lists. Use unnest() for PostgreSQL bulk operations. Wrap batches in transactions. Use ORM bulk methods (Prisma createMany, TypeORM insert). Chunk large batches (500-1000 rows per statement).","Never insert rows one at a time in a loop. Never skip transactions for batch operations (partial failure leaves inconsistent state). Never send unbounded batch sizes (chunk into reasonable sizes).","import { Pool } from 'pg';
+
+const pool = new Pool();
+
+interface UserInsert {
+  name: string;
+  email: string;
+}
+
+// GOOD: Bulk insert with unnest
+async function bulkInsertUsers(users: UserInsert[]): Promise<void> {
+  const names = users.map((u) => u.name);
+  const emails = users.map((u) => u.email);
+  await pool.query(
+    'INSERT INTO users (name, email) SELECT * FROM unnest($1::text[], $2::text[])',
+    [names, emails],
+  );
+}","import { Pool } from 'pg';
+
+const pool = new Pool();
+
+// BAD: One insert per iteration
+async function insertUsers(users: UserInsert[]): Promise<void> {
+  for (const user of users) {
+    await pool.query(
+      'INSERT INTO users (name, email) VALUES ($1, $2)',
+      [user.name, user.email],
+    );
+  }
+  // 1000 users = 1000 round-trips instead of 1
+}",critical,"total execution time for N rows (single vs batch), pg_stat_statements calls count, database connection time in pool metrics"

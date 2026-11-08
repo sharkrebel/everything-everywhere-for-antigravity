@@ -1,0 +1,1031 @@
+No,Category,Guideline,Description,Do,Dont,Code Good,Code Bad,Severity,Docs URL
+1,Setup,"Use express() with TypeScript types","Initialize Express with proper TypeScript configuration, importing types from @types/express for full type safety across request handlers.","Import express and types; use Application type for the app instance; enable strict TypeScript config","Skip @types/express installation; use 'any' for request/response objects; ignore tsconfig strictness","import express, { Application } from 'express';
+
+const app: Application = express();
+const PORT = process.env.PORT || 3000;
+
+app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+});","const express = require('express');
+
+const app = express();
+
+app.listen(3000);",error,https://expressjs.com/en/starter/hello-world.html
+2,Router Setup,"Use express.Router() for modular routes","Organize routes into separate Router modules by feature or resource. Each router file exports a Router instance that is mounted on a path prefix in the main app.","Create separate router files per resource; mount routers with app.use('/prefix', router); keep route handlers thin","Put all routes in a single file; duplicate middleware across routers; use app.get/post directly for large apps","import { Router, Request, Response } from 'express';
+
+const userRouter = Router();
+
+userRouter.get('/', (req: Request, res: Response) => {
+  res.json({ users: [] });
+});
+
+userRouter.get('/:id', (req: Request, res: Response) => {
+  res.json({ user: { id: req.params.id } });
+});
+
+export default userRouter;
+
+// In app.ts
+import userRouter from './routes/user.router';
+app.use('/api/users', userRouter);","import express from 'express';
+const app = express();
+
+app.get('/api/users', (req, res) => { /* ... */ });
+app.get('/api/users/:id', (req, res) => { /* ... */ });
+app.post('/api/users', (req, res) => { /* ... */ });
+app.get('/api/products', (req, res) => { /* ... */ });
+app.get('/api/products/:id', (req, res) => { /* ... */ });
+// hundreds more routes in one file",error,https://expressjs.com/en/guide/routing.html
+3,Middleware Pattern,"Order middleware correctly with (req, res, next)","Middleware functions execute in the order they are registered. Place global middleware (parsing, logging, CORS) before routes, and error handlers after routes.","Register middleware in correct order; always call next() or send a response; use typed middleware signatures","Forget to call next(); register error handlers before routes; add heavy middleware globally when only some routes need it","import express, { Request, Response, NextFunction } from 'express';
+
+const app = express();
+
+// 1. Global middleware first
+app.use(express.json());
+app.use(cors());
+app.use(helmet());
+
+// 2. Logging
+app.use(morgan('combined'));
+
+// 3. Routes
+app.use('/api/users', userRouter);
+app.use('/api/products', productRouter);
+
+// 4. Error handler LAST
+app.use(errorHandler);","import express from 'express';
+const app = express();
+
+// Routes before middleware - broken
+app.use('/api/users', userRouter);
+app.use(express.json()); // too late, body not parsed
+app.use(errorHandler); // error handler before routes
+app.use('/api/products', productRouter);",error,https://expressjs.com/en/guide/using-middleware.html
+4,Error Middleware,"Use 4-parameter error handler (err, req, res, next)","Express recognizes error-handling middleware by its 4-parameter signature. Always register it after all routes. Return structured error responses with appropriate status codes.","Define error handler with all 4 params; register after routes; log errors server-side; send safe messages to clients","Expose stack traces in production; forget the 4th parameter; use try-catch in every route instead of centralized handling","import { Request, Response, NextFunction } from 'express';
+
+interface AppError extends Error {
+  statusCode?: number;
+  isOperational?: boolean;
+}
+
+function errorHandler(
+  err: AppError,
+  req: Request,
+  res: Response,
+  _next: NextFunction
+): void {
+  const statusCode = err.statusCode || 500;
+  const message = err.isOperational
+    ? err.message
+    : 'Internal Server Error';
+
+  console.error(`[ERROR] ${req.method} ${req.path}:`, err);
+
+  res.status(statusCode).json({
+    status: 'error',
+    statusCode,
+    message,
+    ...(process.env.NODE_ENV === 'development' && {
+      stack: err.stack,
+    }),
+  });
+}
+
+export default errorHandler;","app.get('/users', async (req, res) => {
+  try {
+    const users = await getUsers();
+    res.json(users);
+  } catch (err) {
+    // Duplicated in every single route
+    console.error(err);
+    res.status(500).json({ error: 'Something went wrong' });
+  }
+});",error,https://expressjs.com/en/guide/error-handling.html
+5,Request Validation,"Use Zod middleware for body/params/query validation","Create reusable validation middleware using Zod schemas to validate request body, params, and query before reaching the route handler. Reject invalid requests with 400 status.","Define Zod schemas per resource; create reusable validate middleware factory; return detailed validation errors","Validate manually in handlers; trust client input without validation; use loose schemas that allow extra fields","import { z, AnyZodObject, ZodError } from 'zod';
+import { Request, Response, NextFunction } from 'express';
+
+const validate =
+  (schema: {
+    body?: AnyZodObject;
+    params?: AnyZodObject;
+    query?: AnyZodObject;
+  }) =>
+  (req: Request, res: Response, next: NextFunction): void => {
+    try {
+      if (schema.body) req.body = schema.body.parse(req.body);
+      if (schema.params) req.params = schema.params.parse(req.params) as any;
+      if (schema.query) req.query = schema.query.parse(req.query) as any;
+      next();
+    } catch (err) {
+      if (err instanceof ZodError) {
+        res.status(400).json({
+          status: 'error',
+          errors: err.errors,
+        });
+        return;
+      }
+      next(err);
+    }
+  };
+
+const createUserSchema = {
+  body: z.object({
+    name: z.string().min(1),
+    email: z.string().email(),
+    age: z.number().int().positive().optional(),
+  }),
+};
+
+router.post('/users', validate(createUserSchema), createUser);","router.post('/users', (req, res) => {
+  const { name, email } = req.body;
+  if (!name) return res.status(400).json({ error: 'Name required' });
+  if (!email) return res.status(400).json({ error: 'Email required' });
+  if (!email.includes('@')) return res.status(400).json({ error: 'Invalid email' });
+  // manual validation for every field...
+});",error,https://zod.dev/
+6,Auth Middleware,"Implement JWT verification with Bearer token","Create authentication middleware that extracts JWT from the Authorization header, verifies it, and attaches the decoded user to the request object for downstream handlers.","Verify token with a secret/public key; extend Request type for user; return 401 for missing/invalid tokens","Store tokens in plain text; skip token expiry checks; put auth logic in every route handler","import { Request, Response, NextFunction } from 'express';
+import jwt from 'jsonwebtoken';
+
+interface AuthPayload {
+  userId: string;
+  email: string;
+  role: string;
+}
+
+declare global {
+  namespace Express {
+    interface Request {
+      user?: AuthPayload;
+    }
+  }
+}
+
+const JWT_SECRET = process.env.JWT_SECRET!;
+
+function authenticate(
+  req: Request,
+  res: Response,
+  next: NextFunction
+): void {
+  const header = req.headers.authorization;
+
+  if (!header?.startsWith('Bearer ')) {
+    res.status(401).json({ message: 'Missing authorization token' });
+    return;
+  }
+
+  const token = header.slice(7);
+
+  try {
+    const payload = jwt.verify(token, JWT_SECRET) as AuthPayload;
+    req.user = payload;
+    next();
+  } catch {
+    res.status(401).json({ message: 'Invalid or expired token' });
+  }
+}
+
+export default authenticate;
+
+// Usage
+router.get('/profile', authenticate, getProfile);","router.get('/profile', (req, res) => {
+  const token = req.headers['authorization'];
+  // No Bearer prefix check
+  // No try-catch
+  const decoded = jwt.decode(token); // decode != verify!
+  // jwt.decode does NOT verify signature
+  res.json(decoded);
+});",error,https://github.com/auth0/node-jsonwebtoken
+7,CORS Configuration,"Configure cors() package properly","Use the cors package with explicit origin configuration. In production, whitelist specific origins instead of allowing all. Configure allowed methods and headers.","Whitelist allowed origins; set credentials option if using cookies; restrict methods to what your API supports","Use cors() with no options in production (allows all origins); allow all origins with credentials; forget preflight","import cors, { CorsOptions } from 'cors';
+import express from 'express';
+
+const app = express();
+
+const allowedOrigins = [
+  'https://myapp.com',
+  'https://admin.myapp.com',
+];
+
+if (process.env.NODE_ENV === 'development') {
+  allowedOrigins.push('http://localhost:3000');
+}
+
+const corsOptions: CorsOptions = {
+  origin: (origin, callback) => {
+    if (!origin || allowedOrigins.includes(origin)) {
+      callback(null, true);
+    } else {
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  credentials: true,
+  maxAge: 86400,
+};
+
+app.use(cors(corsOptions));","import cors from 'cors';
+
+// Allows ANY origin in production - security risk
+app.use(cors());
+
+// Or even worse, wildcard with credentials
+app.use(cors({
+  origin: '*',
+  credentials: true, // this combination is invalid
+}));",warning,https://github.com/expressjs/cors
+8,Helmet Security,"Use helmet() for security headers","Helmet sets various HTTP security headers like Content-Security-Policy, X-Frame-Options, and Strict-Transport-Security. Always use it in production.","Apply helmet() as early middleware; customize CSP for your needs; test that headers are set correctly","Skip helmet in production; disable all protections; rely solely on reverse proxy for headers","import helmet from 'helmet';
+import express from 'express';
+
+const app = express();
+
+app.use(
+  helmet({
+    contentSecurityPolicy: {
+      directives: {
+        defaultSrc: [""'self'""],
+        scriptSrc: [""'self'"", ""'unsafe-inline'""],
+        styleSrc: [""'self'"", ""'unsafe-inline'""],
+        imgSrc: [""'self'"", 'data:', 'https:'],
+      },
+    },
+    crossOriginEmbedderPolicy: true,
+    crossOriginOpenerPolicy: true,
+    crossOriginResourcePolicy: { policy: 'same-site' },
+    hsts: {
+      maxAge: 31536000,
+      includeSubDomains: true,
+      preload: true,
+    },
+  })
+);","import express from 'express';
+
+const app = express();
+// No helmet - missing security headers
+// Vulnerable to clickjacking, MIME sniffing, etc.
+
+app.get('/', (req, res) => {
+  res.send('Hello');
+});",warning,https://helmetjs.github.io/
+9,Rate Limiting,"Configure express-rate-limit properly","Apply rate limiting to protect against abuse and DDoS. Use stricter limits on auth endpoints. Consider a Redis store for distributed deployments.","Set different limits per route group; use a persistent store in production; return Retry-After header","Use default memory store in multi-process; set limits too high to be effective; skip rate limiting on auth endpoints","import rateLimit from 'express-rate-limit';
+import RedisStore from 'rate-limit-redis';
+import { createClient } from 'redis';
+
+const redisClient = createClient({
+  url: process.env.REDIS_URL,
+});
+
+const globalLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 100,
+  standardHeaders: true,
+  legacyHeaders: false,
+  store: new RedisStore({
+    sendCommand: (...args: string[]) =>
+      redisClient.sendCommand(args),
+  }),
+  message: {
+    status: 429,
+    message: 'Too many requests, please try again later',
+  },
+});
+
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 5,
+  message: {
+    status: 429,
+    message: 'Too many login attempts',
+  },
+});
+
+app.use('/api/', globalLimiter);
+app.use('/api/auth/login', authLimiter);","import express from 'express';
+const app = express();
+
+// No rate limiting at all
+app.post('/api/auth/login', loginHandler);
+// Vulnerable to brute force attacks",warning,https://github.com/express-rate-limit/express-rate-limit
+10,Request Logging,"Use pino-http or morgan for structured logging","Structured logging provides searchable, parseable logs for production debugging. Use pino-http for high-performance JSON logging or morgan for simple HTTP logging.","Use structured JSON logging in production; include request ID; log response time; redact sensitive fields","Use console.log for request logging; log sensitive data (passwords, tokens); skip logging in production","import pino from 'pino';
+import pinoHttp from 'pino-http';
+import { randomUUID } from 'crypto';
+
+const logger = pino({
+  level: process.env.LOG_LEVEL || 'info',
+  transport:
+    process.env.NODE_ENV === 'development'
+      ? { target: 'pino-pretty' }
+      : undefined,
+  redact: ['req.headers.authorization', 'req.body.password'],
+});
+
+const httpLogger = pinoHttp({
+  logger,
+  genReqId: (req) =>
+    (req.headers['x-request-id'] as string) || randomUUID(),
+  customSuccessMessage: (req, res) =>
+    `${req.method} ${req.url} ${res.statusCode}`,
+  customErrorMessage: (req, res) =>
+    `${req.method} ${req.url} ${res.statusCode} failed`,
+});
+
+app.use(httpLogger);
+
+export default logger;","import express from 'express';
+const app = express();
+
+app.use((req, res, next) => {
+  console.log(`${req.method} ${req.url}`);
+  console.log('Headers:', req.headers); // logs auth tokens!
+  console.log('Body:', req.body); // logs passwords!
+  next();
+});",warning,https://github.com/pinojs/pino-http
+11,Response Helpers,"Create typed response utilities","Build consistent response wrappers that enforce a standard API response shape. Use generics for type-safe response data.","Define a standard response interface; use generics for data typing; create success/error helper functions","Return inconsistent response shapes; mix response formats across endpoints; forget to set status codes","interface ApiResponse<T> {
+  status: 'success' | 'error';
+  data?: T;
+  message?: string;
+  meta?: {
+    page?: number;
+    limit?: number;
+    total?: number;
+  };
+}
+
+function sendSuccess<T>(
+  res: Response,
+  data: T,
+  statusCode = 200,
+  meta?: ApiResponse<T>['meta']
+): void {
+  res.status(statusCode).json({
+    status: 'success',
+    data,
+    ...(meta && { meta }),
+  });
+}
+
+function sendError(
+  res: Response,
+  message: string,
+  statusCode = 400
+): void {
+  res.status(statusCode).json({
+    status: 'error',
+    message,
+  });
+}
+
+// Usage
+router.get('/users', async (req: Request, res: Response) => {
+  const users = await userService.findAll();
+  sendSuccess(res, users, 200, { total: users.length });
+});","router.get('/users', async (req, res) => {
+  const users = await getUsers();
+  res.json(users); // no consistent wrapper
+});
+
+router.get('/products', async (req, res) => {
+  const products = await getProducts();
+  res.send({ items: products }); // different shape
+});
+
+router.get('/orders', async (req, res) => {
+  const orders = await getOrders();
+  res.json({ data: orders, success: true }); // yet another shape
+});",info,https://expressjs.com/en/api.html#res.json
+12,Route Parameters,"Validate req.params properly","Always validate route parameters using Zod or a similar library. Cast and verify parameter types since Express params are always strings.","Validate and parse params with Zod; handle invalid params with 400 response; use descriptive param names","Trust req.params without validation; assume params are numbers; use params directly in database queries","import { Router, Request, Response } from 'express';
+import { z } from 'zod';
+
+const paramsSchema = z.object({
+  id: z.string().uuid('Invalid ID format'),
+});
+
+type UserParams = z.infer<typeof paramsSchema>;
+
+const router = Router();
+
+router.get(
+  '/users/:id',
+  (req: Request<UserParams>, res: Response, next) => {
+    const result = paramsSchema.safeParse(req.params);
+    if (!result.success) {
+      res.status(400).json({
+        status: 'error',
+        errors: result.error.errors,
+      });
+      return;
+    }
+    const { id } = result.data;
+    // id is now a validated UUID string
+    next();
+  },
+  getUserById
+);","router.get('/users/:id', async (req, res) => {
+  const id = req.params.id;
+  // No validation - could be anything
+  // SQL injection risk if used directly
+  const user = await db.query(
+    `SELECT * FROM users WHERE id = ${id}`
+  );
+  res.json(user);
+});",error,https://expressjs.com/en/guide/routing.html#route-parameters
+13,Query Parameters,"Parse req.query with Zod schemas","Express query parameters are always strings or string arrays. Use Zod's coerce or transform to convert to proper types, with defaults for optional parameters.","Use Zod coerce for type conversion; provide defaults for pagination; validate enum values for sort/filter","Assume query params are correct types; skip default values; use parseInt without NaN checks","import { z } from 'zod';
+import { Request, Response } from 'express';
+
+const paginationSchema = z.object({
+  page: z.coerce.number().int().positive().default(1),
+  limit: z.coerce.number().int().min(1).max(100).default(20),
+  sort: z.enum(['createdAt', 'name', 'email']).default('createdAt'),
+  order: z.enum(['asc', 'desc']).default('desc'),
+  search: z.string().optional(),
+});
+
+type PaginationQuery = z.infer<typeof paginationSchema>;
+
+router.get('/users', (req: Request, res: Response) => {
+  const result = paginationSchema.safeParse(req.query);
+
+  if (!result.success) {
+    res.status(400).json({ errors: result.error.errors });
+    return;
+  }
+
+  const { page, limit, sort, order, search } = result.data;
+  const offset = (page - 1) * limit;
+  // Use validated, typed query params
+});","router.get('/users', (req, res) => {
+  // query params are strings, not numbers!
+  const page = req.query.page; // string | undefined
+  const limit = req.query.limit; // string | undefined
+  const offset = (page - 1) * limit; // NaN
+  // No validation, no defaults, wrong types
+});",error,https://zod.dev/
+14,File Upload,"Configure multer middleware properly","Use multer for multipart/form-data file uploads. Configure file size limits, allowed MIME types, and storage destination. Always validate uploaded files.","Set file size limits; validate MIME types; use unique filenames; clean up failed uploads","Accept any file type without validation; skip size limits; use original filenames (path traversal risk)","import multer, { FileFilterCallback } from 'multer';
+import path from 'path';
+import { randomUUID } from 'crypto';
+import { Request } from 'express';
+
+const ALLOWED_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
+const MAX_SIZE = 5 * 1024 * 1024; // 5MB
+
+const storage = multer.diskStorage({
+  destination: './uploads',
+  filename: (_req, file, cb) => {
+    const ext = path.extname(file.originalname);
+    cb(null, `${randomUUID()}${ext}`);
+  },
+});
+
+const fileFilter = (
+  _req: Request,
+  file: Express.Multer.File,
+  cb: FileFilterCallback
+) => {
+  if (ALLOWED_TYPES.includes(file.mimetype)) {
+    cb(null, true);
+  } else {
+    cb(new Error(`File type ${file.mimetype} not allowed`));
+  }
+};
+
+const upload = multer({
+  storage,
+  limits: { fileSize: MAX_SIZE },
+  fileFilter,
+});
+
+router.post(
+  '/avatar',
+  authenticate,
+  upload.single('avatar'),
+  updateAvatar
+);","import multer from 'multer';
+
+// No limits, no type checking, original filenames
+const upload = multer({ dest: 'uploads/' });
+
+router.post('/upload', upload.any(), (req, res) => {
+  // Accepts any number of any type of file
+  // No size limit - DoS risk
+  // No auth - anyone can upload
+  res.json({ files: req.files });
+});",error,https://github.com/expressjs/multer
+15,Static Files,"Configure express.static() securely","Serve static files from a dedicated directory with proper cache headers. Use absolute paths and prevent directory traversal.","Use absolute path with path.join; set cache headers for production; mount on specific prefix; use etag","Serve from project root; skip cache headers; serve node_modules or source files; use relative paths","import express from 'express';
+import path from 'path';
+
+const app = express();
+
+// Serve from dedicated public directory with caching
+app.use(
+  '/static',
+  express.static(path.join(__dirname, '..', 'public'), {
+    maxAge: process.env.NODE_ENV === 'production'
+      ? '1y'
+      : 0,
+    etag: true,
+    lastModified: true,
+    index: false, // disable directory index
+    dotfiles: 'deny', // deny access to dotfiles
+  })
+);
+
+// Serve uploaded files with shorter cache
+app.use(
+  '/uploads',
+  express.static(path.join(__dirname, '..', 'uploads'), {
+    maxAge: '1d',
+    immutable: false,
+  })
+);","import express from 'express';
+
+const app = express();
+
+// Serves EVERYTHING from project root - exposes source code!
+app.use(express.static('.'));
+
+// Or even worse
+app.use(express.static('/'));",error,https://expressjs.com/en/starter/static-files.html
+16,JSON Body Parsing,"Configure express.json() with limits","Always set a body size limit to prevent large payload attacks. Configure content type and reviver options as needed.","Set payload size limit; handle parse errors; configure for specific routes if needed","Skip body size limit; ignore malformed JSON errors; set excessively large limits","import express from 'express';
+
+const app = express();
+
+// Global JSON parsing with size limit
+app.use(
+  express.json({
+    limit: '10kb',
+    strict: true,
+    type: 'application/json',
+  })
+);
+
+// For webhook routes that need raw body (e.g., Stripe)
+app.use(
+  '/api/webhooks/stripe',
+  express.raw({
+    type: 'application/json',
+    limit: '1mb',
+  })
+);
+
+// URL-encoded form data
+app.use(
+  express.urlencoded({
+    extended: true,
+    limit: '10kb',
+  })
+);","import express from 'express';
+const app = express();
+
+// No size limit - DoS vulnerability
+app.use(express.json());
+
+// Or dangerously large limit
+app.use(express.json({ limit: '500mb' }));",warning,https://expressjs.com/en/api.html#express.json
+17,Cookie/Session,"Configure cookie-parser and express-session securely","Use signed cookies and secure session configuration. In production, use a persistent session store like Redis instead of the default memory store.","Use secure cookie options; sign cookies; use Redis session store in production; set httpOnly and sameSite","Use default MemoryStore in production; skip secure flag; store sensitive data in cookies; use weak secrets","import session from 'express-session';
+import RedisStore from 'connect-redis';
+import { createClient } from 'redis';
+import cookieParser from 'cookie-parser';
+import express from 'express';
+
+const app = express();
+const redisClient = createClient({ url: process.env.REDIS_URL });
+
+app.use(cookieParser(process.env.COOKIE_SECRET));
+
+app.use(
+  session({
+    store: new RedisStore({ client: redisClient }),
+    secret: process.env.SESSION_SECRET!,
+    name: 'sessionId',
+    resave: false,
+    saveUninitialized: false,
+    cookie: {
+      secure: process.env.NODE_ENV === 'production',
+      httpOnly: true,
+      sameSite: 'lax',
+      maxAge: 24 * 60 * 60 * 1000, // 24 hours
+      domain: process.env.COOKIE_DOMAIN,
+    },
+  })
+);","import session from 'express-session';
+import express from 'express';
+
+const app = express();
+
+app.use(session({
+  secret: 'keyboard cat', // weak secret
+  resave: true,
+  saveUninitialized: true,
+  // MemoryStore leaks memory in production
+  cookie: {
+    secure: false, // sent over HTTP
+    httpOnly: false, // accessible to JS
+    // no sameSite - CSRF vulnerable
+  },
+}));",error,https://github.com/expressjs/session
+18,HTTP Status Codes,"Use proper HTTP status codes consistently","Return semantically correct HTTP status codes. Create constants or an enum for commonly used status codes to ensure consistency across the codebase.","Use 201 for created; 204 for no content; 404 for not found; 409 for conflict; 422 for validation errors","Use 200 for everything; return 500 for client errors; send 200 with error in body","const HttpStatus = {
+  OK: 200,
+  CREATED: 201,
+  NO_CONTENT: 204,
+  BAD_REQUEST: 400,
+  UNAUTHORIZED: 401,
+  FORBIDDEN: 403,
+  NOT_FOUND: 404,
+  CONFLICT: 409,
+  UNPROCESSABLE: 422,
+  TOO_MANY_REQUESTS: 429,
+  INTERNAL_ERROR: 500,
+} as const;
+
+// Usage in routes
+router.post('/users', async (req: Request, res: Response) => {
+  const existing = await userService.findByEmail(req.body.email);
+  if (existing) {
+    res.status(HttpStatus.CONFLICT).json({
+      status: 'error',
+      message: 'Email already registered',
+    });
+    return;
+  }
+
+  const user = await userService.create(req.body);
+  res.status(HttpStatus.CREATED).json({
+    status: 'success',
+    data: user,
+  });
+});
+
+router.delete('/users/:id', async (req: Request, res: Response) => {
+  await userService.delete(req.params.id);
+  res.status(HttpStatus.NO_CONTENT).send();
+});","router.post('/users', async (req, res) => {
+  try {
+    const user = await createUser(req.body);
+    res.status(200).json(user); // should be 201
+  } catch (err) {
+    // Always 500, even for validation errors
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.delete('/users/:id', async (req, res) => {
+  await deleteUser(req.params.id);
+  res.status(200).json({ deleted: true }); // should be 204
+});",warning,https://developer.mozilla.org/en-US/docs/Web/HTTP/Status
+19,Async Route Handler,"Wrap async handlers to catch errors","Express 4.x does not catch promise rejections in route handlers. Wrap async handlers to forward errors to the error-handling middleware automatically.","Use a wrapper function for async handlers; or use express-async-errors package; forward all rejections to next()","Use bare async functions without catching; forget to call next(err); let unhandled rejections crash the process","import { Request, Response, NextFunction, RequestHandler } from 'express';
+
+// Option 1: Wrapper utility
+const asyncHandler = (
+  fn: (req: Request, res: Response, next: NextFunction) => Promise<void>
+): RequestHandler => {
+  return (req, res, next) => {
+    Promise.resolve(fn(req, res, next)).catch(next);
+  };
+};
+
+// Usage
+router.get(
+  '/users',
+  asyncHandler(async (req: Request, res: Response) => {
+    const users = await userService.findAll();
+    res.json({ status: 'success', data: users });
+    // If findAll() throws, error goes to error middleware
+  })
+);
+
+// Option 2: Use express-async-errors (patches Express)
+import 'express-async-errors';
+
+router.get('/users', async (req: Request, res: Response) => {
+  const users = await userService.findAll();
+  res.json({ status: 'success', data: users });
+});","router.get('/users', async (req, res) => {
+  // If this throws, Express won't catch it!
+  // UnhandledPromiseRejection -> process crash
+  const users = await userService.findAll();
+  res.json(users);
+});
+
+// Or catching but not forwarding
+router.get('/users', async (req, res) => {
+  try {
+    const users = await userService.findAll();
+    res.json(users);
+  } catch (err) {
+    // Swallows error, sends nothing
+    console.log(err);
+  }
+});",error,https://expressjs.com/en/guide/error-handling.html
+20,TypeScript Integration,"Use typed Request and Response generics","Leverage Express generic types for Request<Params, ResBody, ReqBody, Query> to get full type safety in route handlers. Extend types for custom properties.","Use Request generics for params/body/query types; extend Express namespace for custom properties; use strict types","Use 'any' for request types; skip generic parameters; access req.body without typing","import { Request, Response } from 'express';
+
+// Define types for each part of the request
+interface CreateUserBody {
+  name: string;
+  email: string;
+  role: 'admin' | 'user';
+}
+
+interface UserParams {
+  id: string;
+}
+
+interface UserQuery {
+  include?: string;
+  fields?: string;
+}
+
+interface UserResponse {
+  id: string;
+  name: string;
+  email: string;
+  role: string;
+  createdAt: string;
+}
+
+// Fully typed route handler
+router.post(
+  '/users',
+  async (
+    req: Request<{}, UserResponse, CreateUserBody>,
+    res: Response<{ status: string; data: UserResponse }>
+  ) => {
+    // req.body is typed as CreateUserBody
+    const { name, email, role } = req.body;
+    const user = await userService.create({ name, email, role });
+    res.status(201).json({ status: 'success', data: user });
+  }
+);
+
+router.get(
+  '/users/:id',
+  async (
+    req: Request<UserParams, UserResponse, {}, UserQuery>,
+    res: Response
+  ) => {
+    const { id } = req.params; // typed as string
+    const { include } = req.query; // typed as string | undefined
+    const user = await userService.findById(id, { include });
+    res.json({ status: 'success', data: user });
+  }
+);","router.post('/users', async (req: any, res: any) => {
+  // No type safety at all
+  const name = req.body.whatever; // no error
+  const x = req.body.nonexistent.deep.prop; // runtime crash
+  res.json({ anything: 'goes' });
+});",warning,https://expressjs.com/en/5x/api.html
+21,Testing Routes,"Use supertest for integration testing","Test Express routes using supertest which provides a high-level abstraction for testing HTTP. Create a testable app instance without starting the server.","Export app separately from server.listen; test status codes and response shape; test error cases; use beforeAll/afterAll","Start the actual server for tests; test only happy paths; skip error case testing; hardcode test data","import request from 'supertest';
+import express from 'express';
+import { createApp } from '../app';
+
+// app.ts exports a function that creates the Express app
+// WITHOUT calling .listen()
+describe('User API', () => {
+  let app: express.Application;
+
+  beforeAll(async () => {
+    app = await createApp();
+  });
+
+  describe('GET /api/users', () => {
+    it('should return 200 with user list', async () => {
+      const response = await request(app)
+        .get('/api/users')
+        .set('Authorization', `Bearer ${testToken}`)
+        .expect('Content-Type', /json/)
+        .expect(200);
+
+      expect(response.body.status).toBe('success');
+      expect(Array.isArray(response.body.data)).toBe(true);
+    });
+
+    it('should return 401 without auth token', async () => {
+      await request(app)
+        .get('/api/users')
+        .expect(401);
+    });
+  });
+
+  describe('POST /api/users', () => {
+    it('should return 400 for invalid body', async () => {
+      const response = await request(app)
+        .post('/api/users')
+        .set('Authorization', `Bearer ${testToken}`)
+        .send({ name: '' })
+        .expect(400);
+
+      expect(response.body.status).toBe('error');
+    });
+  });
+});","// Bad: importing the file that calls .listen()
+import app from '../index'; // starts server!
+
+test('get users', async () => {
+  // No supertest, using actual fetch
+  const res = await fetch('http://localhost:3000/api/users');
+  // Depends on server running, port available, etc.
+  expect(res.ok).toBe(true);
+});",info,https://github.com/ladjs/supertest
+22,Graceful Shutdown,"Implement server.close() with cleanup","Handle SIGTERM and SIGINT signals to gracefully shut down the HTTP server, close database connections, and finish in-flight requests before exiting.","Close server first (stop accepting new connections); drain existing connections; close DB pool; set force-exit timeout","Call process.exit() immediately; skip database disconnection; ignore in-flight requests; forget SIGTERM","import express from 'express';
+import { Server } from 'http';
+import { PrismaClient } from '@prisma/client';
+
+const app = express();
+const prisma = new PrismaClient();
+let server: Server;
+
+async function shutdown(signal: string): Promise<void> {
+  console.log(`\n${signal} received. Starting graceful shutdown...`);
+
+  // 1. Stop accepting new connections
+  server.close(() => {
+    console.log('HTTP server closed');
+  });
+
+  // 2. Set a force-exit timeout
+  const forceExit = setTimeout(() => {
+    console.error('Forcing exit after timeout');
+    process.exit(1);
+  }, 30000);
+
+  try {
+    // 3. Close database connections
+    await prisma.$disconnect();
+    console.log('Database disconnected');
+
+    clearTimeout(forceExit);
+    process.exit(0);
+  } catch (err) {
+    console.error('Error during shutdown:', err);
+    clearTimeout(forceExit);
+    process.exit(1);
+  }
+}
+
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));
+
+server = app.listen(3000, () => {
+  console.log('Server running on port 3000');
+});","import express from 'express';
+
+const app = express();
+
+app.listen(3000);
+
+// No signal handling at all
+// Kubernetes sends SIGTERM -> instant crash
+// In-flight requests are dropped
+// Database connections leak",error,https://expressjs.com/en/advanced/healthcheck-graceful-shutdown.html
+23,Health Check,"Implement GET /health endpoint","Expose a health check endpoint that returns service status, uptime, and optionally checks downstream dependencies. Used by load balancers and orchestrators.","Check database connectivity in readiness probe; return quickly; include version info; use separate liveness/readiness","Run expensive queries in health checks; expose sensitive internal details; skip health checks entirely","import { Router, Request, Response } from 'express';
+import { PrismaClient } from '@prisma/client';
+
+const healthRouter = Router();
+const prisma = new PrismaClient();
+
+// Liveness: is the process alive?
+healthRouter.get(
+  '/health',
+  (req: Request, res: Response) => {
+    res.status(200).json({
+      status: 'ok',
+      uptime: process.uptime(),
+      timestamp: new Date().toISOString(),
+      version: process.env.APP_VERSION || '1.0.0',
+    });
+  }
+);
+
+// Readiness: can it serve traffic?
+healthRouter.get(
+  '/health/ready',
+  async (req: Request, res: Response) => {
+    try {
+      await prisma.$queryRaw`SELECT 1`;
+
+      res.status(200).json({
+        status: 'ok',
+        checks: {
+          database: 'connected',
+        },
+      });
+    } catch (err) {
+      res.status(503).json({
+        status: 'error',
+        checks: {
+          database: 'disconnected',
+        },
+      });
+    }
+  }
+);
+
+export default healthRouter;","// No health check endpoint at all
+// Load balancer can't determine if service is healthy
+// Kubernetes has no way to know if pod is ready
+
+// Or a health check that's too expensive
+app.get('/health', async (req, res) => {
+  const userCount = await db.user.count();
+  const orderCount = await db.order.count();
+  // Full table counts on every health check!
+  res.json({ users: userCount, orders: orderCount });
+});",warning,https://expressjs.com/en/advanced/healthcheck-graceful-shutdown.html
+24,API Versioning,"Use /api/v1 route grouping","Group routes under version prefixes to support API evolution without breaking existing clients. Use Router composition for clean version management.","Use explicit version prefixes; support at most 2 versions simultaneously; deprecate old versions with headers","Change existing endpoints without versioning; maintain too many versions; version individual endpoints inconsistently","import express, { Router } from 'express';
+import userRouterV1 from './routes/v1/users';
+import productRouterV1 from './routes/v1/products';
+import userRouterV2 from './routes/v2/users';
+import productRouterV2 from './routes/v2/products';
+
+const app = express();
+
+// V1 routes
+const v1Router = Router();
+v1Router.use('/users', userRouterV1);
+v1Router.use('/products', productRouterV1);
+
+// V2 routes
+const v2Router = Router();
+v2Router.use('/users', userRouterV2);
+v2Router.use('/products', productRouterV2);
+
+// Mount versioned routers
+app.use('/api/v1', v1Router);
+app.use('/api/v2', v2Router);
+
+// Deprecation middleware for v1
+app.use('/api/v1', (req, res, next) => {
+  res.setHeader('Deprecation', 'true');
+  res.setHeader(
+    'Sunset',
+    'Sat, 01 Jan 2026 00:00:00 GMT'
+  );
+  res.setHeader(
+    'Link',
+    '</api/v2>; rel=""successor-version""'
+  );
+  next();
+});","import express from 'express';
+const app = express();
+
+// No versioning - breaking changes affect all clients
+app.get('/api/users', getUsersOld);
+
+// Later, you change the response format...
+app.get('/api/users', getUsersNew);
+// All clients break immediately",info,https://expressjs.com/en/guide/routing.html
+25,Production Config,"Configure trust proxy, compression, and logging","In production, configure Express to work behind reverse proxies, enable response compression, and set appropriate logging levels.","Set trust proxy for correct client IP; enable compression; use production logging; disable x-powered-by","Skip trust proxy behind nginx/ALB; leave x-powered-by enabled; use development settings in production","import express from 'express';
+import compression from 'compression';
+import helmet from 'helmet';
+import pinoHttp from 'pino-http';
+import pino from 'pino';
+
+const app = express();
+const isProduction = process.env.NODE_ENV === 'production';
+
+// Trust first proxy (nginx, ALB, etc.)
+if (isProduction) {
+  app.set('trust proxy', 1);
+}
+
+// Remove x-powered-by header
+app.disable('x-powered-by');
+
+// Compression
+app.use(
+  compression({
+    filter: (req, res) => {
+      if (req.headers['x-no-compression']) return false;
+      return compression.filter(req, res);
+    },
+    threshold: 1024,
+  })
+);
+
+// Security headers
+app.use(helmet());
+
+// Production logger
+const logger = pino({
+  level: isProduction ? 'info' : 'debug',
+  transport: isProduction
+    ? undefined
+    : { target: 'pino-pretty' },
+});
+
+app.use(pinoHttp({ logger }));
+
+// Body parsing with limits
+app.use(express.json({ limit: '10kb' }));
+app.use(express.urlencoded({ extended: true, limit: '10kb' }));","import express from 'express';
+
+const app = express();
+
+// x-powered-by leaks framework info
+// No trust proxy - wrong client IPs behind nginx
+// No compression - larger payloads
+// No security headers
+
+app.use(express.json()); // no size limit
+
+app.listen(3000);
+// Running in development mode in production",warning,https://expressjs.com/en/advanced/best-practice-performance.html

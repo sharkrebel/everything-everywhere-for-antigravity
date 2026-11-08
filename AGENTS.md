@@ -61,6 +61,24 @@
   * "bộ quy chuẩn thương hiệu / brand guideline" -> brand-guidelines
   * "bảng màu theme / thiết kế theme giao diện" -> theme-factory
   * "tạo web artifact / giao diện html tương tác tức thì" -> web-artifacts-builder
+  * "thiết kế web không slop / hallmark / web cao cấp / redesign giao diện" -> hallmark
+  * "khởi tạo app từ đầu / app builder / tạo dự án mới" -> app-builder
+  * "giải quyết vấn đề sâu / solve deep / phân tích bài toán khó" -> solve.deep
+  * "đưa ra quyết định đa khung / so sánh phương án sâu" -> decide.deep
+  * "tối ưu tỷ lệ chuyển đổi / cro trang web / tăng conversion" -> conversion-optimization
+  * "viết bài quảng cáo / ad creative / mẫu quảng cáo đa kênh" -> ad-creative-variations
+  * "viết bài bán hàng / copywriting chốt đơn / landing page copy" -> copywriting
+  * "nghiên cứu đối thủ / phân tích đối thủ / competitor teardown" -> competitor-teardown
+  * "tối ưu luồng đăng ký / signup flow cro / giảm drop-off" -> signup-flow-cro
+  * "chiến dịch marketing tổng thể / lên plan campaign" -> campaign
+  * "tối ưu seo programmatic / seo hàng loạt" -> programmatic-seo
+  * "kiến trúc nestjs / backend nestjs / viết code nestjs" -> nestjs-expert
+  * "lập trình vue / vue 3 composition api / vue router" -> vue-expert
+  * "thiết kế schema prisma / query prisma / tối ưu prisma" -> prisma-expert
+  * "tạo video bằng code / dựng video react remotion" -> remotion-best-practices
+  * "cấu hình docker / tối ưu dockerfile / docker compose" -> docker-expert
+  * "quản trị server linux / lệnh bash linux / server management" -> server-management
+  * "red team / kiểm thử xâm nhập / pentest bảo mật" -> red-team-tactics
 
 ## 2. Tiêu chuẩn phản hồi
 - Giữ phong cách ngắn gọn, súc tích, giải quyết thẳng vào vấn đề.

@@ -1,0 +1,892 @@
+No,Category,Guideline,Description,Do,Dont,Code Good,Code Bad,Severity,Docs URL
+1,Module Setup,Define modules with explicit imports/providers/exports,"Every feature should be encapsulated in a module using @Module decorator. Declare providers for DI, imports for dependent modules, and exports for shared providers.",Use @Module with clearly separated imports/providers/exports arrays,Dump all providers into AppModule or forget to export shared providers,"import { Module } from '@nestjs/common';
+import { UsersController } from './users.controller';
+import { UsersService } from './users.service';
+import { PrismaModule } from '../prisma/prisma.module';
+
+@Module({
+  imports: [PrismaModule],
+  controllers: [UsersController],
+  providers: [UsersService],
+  exports: [UsersService],
+})
+export class UsersModule {}","import { Module } from '@nestjs/common';
+import { UsersController } from './users.controller';
+import { UsersService } from './users.service';
+import { PrismaService } from '../prisma/prisma.service';
+
+// BAD: PrismaService duplicated instead of importing PrismaModule
+// BAD: Not exporting UsersService when other modules need it
+@Module({
+  controllers: [UsersController],
+  providers: [UsersService, PrismaService],
+})
+export class UsersModule {}",error,https://docs.nestjs.com/modules
+2,Controller,Use @Controller with RESTful route decorators,"Controllers handle incoming requests and return responses. Use route decorators (@Get, @Post, etc.) and keep controllers thin by delegating logic to services.",Keep controllers thin and use proper HTTP method decorators with route params,Put business logic in controllers or use raw strings for status codes,"import { Controller, Get, Post, Body, Param, HttpCode, HttpStatus } from '@nestjs/common';
+import { UsersService } from './users.service';
+import { CreateUserDto } from './dto/create-user.dto';
+
+@Controller('users')
+export class UsersController {
+  constructor(private readonly usersService: UsersService) {}
+
+  @Post()
+  @HttpCode(HttpStatus.CREATED)
+  create(@Body() createUserDto: CreateUserDto) {
+    return this.usersService.create(createUserDto);
+  }
+
+  @Get(':id')
+  findOne(@Param('id') id: string) {
+    return this.usersService.findOne(id);
+  }
+}","import { Controller, Req, Res } from '@nestjs/common';
+import { Request, Response } from 'express';
+import { PrismaService } from '../prisma/prisma.service';
+
+// BAD: Using raw req/res, business logic in controller, direct DB access
+@Controller()
+export class UsersController {
+  constructor(private readonly prisma: PrismaService) {}
+
+  @Post('users')
+  async create(@Req() req: Request, @Res() res: Response) {
+    const user = await this.prisma.user.create({ data: req.body });
+    res.status(201).json(user);
+  }
+}",error,https://docs.nestjs.com/controllers
+3,Provider/Service,Use @Injectable services for business logic,"Services contain business logic and are injected into controllers via constructor injection. Mark them with @Injectable and register as providers in their module.",Encapsulate business logic in @Injectable services with single responsibility,Mix data access and business logic without separation,"import { Injectable, NotFoundException } from '@nestjs/common';
+import { PrismaService } from '../prisma/prisma.service';
+import { CreateUserDto } from './dto/create-user.dto';
+
+@Injectable()
+export class UsersService {
+  constructor(private readonly prisma: PrismaService) {}
+
+  async create(dto: CreateUserDto) {
+    return this.prisma.user.create({ data: dto });
+  }
+
+  async findOne(id: string) {
+    const user = await this.prisma.user.findUnique({ where: { id } });
+    if (!user) throw new NotFoundException(`User ${id} not found`);
+    return user;
+  }
+}","// BAD: No @Injectable, no error handling, no typing
+class UsersService {
+  async create(data: any) {
+    const { PrismaClient } = require('@prisma/client');
+    const prisma = new PrismaClient();
+    return prisma.user.create({ data });
+  }
+}",error,https://docs.nestjs.com/providers
+4,Pipes,Use validation pipes with class-validator or Zod,"Pipes transform and validate incoming data before it reaches the handler. Use ValidationPipe globally or per-route with class-validator decorators or Zod schemas.",Enable global ValidationPipe with whitelist and transform options,Accept raw unvalidated input or validate manually in controllers,"import { ValidationPipe } from '@nestjs/common';
+import { NestFactory } from '@nestjs/core';
+import { AppModule } from './app.module';
+
+async function bootstrap() {
+  const app = await NestFactory.create(AppModule);
+  app.useGlobalPipes(
+    new ValidationPipe({
+      whitelist: true,
+      forbidNonWhitelisted: true,
+      transform: true,
+    }),
+  );
+  await app.listen(3000);
+}
+bootstrap();","import { Controller, Post, Body } from '@nestjs/common';
+
+@Controller('users')
+export class UsersController {
+  @Post()
+  create(@Body() body: any) {
+    // BAD: No validation, accepts anything
+    if (!body.email) throw new Error('Email required');
+    if (!body.name) throw new Error('Name required');
+    return this.usersService.create(body);
+  }
+}",error,https://docs.nestjs.com/techniques/validation
+5,Guards,Use @UseGuards for authentication and authorization,"Guards determine whether a request should be handled by the route handler. Use them for auth checks, role-based access, and other pre-handler validations.",Implement CanActivate interface and use @UseGuards decorator,Check auth manually inside each route handler,"import { Injectable, CanActivate, ExecutionContext } from '@nestjs/common';
+import { JwtService } from '@nestjs/jwt';
+import { Request } from 'express';
+
+@Injectable()
+export class AuthGuard implements CanActivate {
+  constructor(private readonly jwtService: JwtService) {}
+
+  async canActivate(context: ExecutionContext): Promise<boolean> {
+    const request = context.switchToHttp().getRequest<Request>();
+    const token = this.extractToken(request);
+    if (!token) return false;
+    try {
+      const payload = await this.jwtService.verifyAsync(token);
+      request['user'] = payload;
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  private extractToken(req: Request): string | undefined {
+    const [type, token] = req.headers.authorization?.split(' ') ?? [];
+    return type === 'Bearer' ? token : undefined;
+  }
+}","import { Controller, Post, Req } from '@nestjs/common';
+import * as jwt from 'jsonwebtoken';
+
+@Controller('protected')
+export class ProtectedController {
+  @Post()
+  async doSomething(@Req() req: any) {
+    // BAD: Manual auth check in every handler
+    const token = req.headers.authorization?.split(' ')[1];
+    if (!token) throw new Error('Unauthorized');
+    const decoded = jwt.verify(token, 'secret');
+    // ... handler logic
+  }
+}",error,https://docs.nestjs.com/guards
+6,Interceptors,Use interceptors for logging and response transformation,"Interceptors add extra logic before/after method execution. Use them for logging, caching, response mapping, and timing without polluting business logic.",Implement NestInterceptor for cross-cutting concerns,Add logging or transformation logic directly in every handler,"import { Injectable, NestInterceptor, ExecutionContext, CallHandler, Logger } from '@nestjs/common';
+import { Observable, tap } from 'rxjs';
+
+@Injectable()
+export class LoggingInterceptor implements NestInterceptor {
+  private readonly logger = new Logger(LoggingInterceptor.name);
+
+  intercept(context: ExecutionContext, next: CallHandler): Observable<any> {
+    const req = context.switchToHttp().getRequest();
+    const { method, url } = req;
+    const now = Date.now();
+
+    return next.handle().pipe(
+      tap(() => {
+        this.logger.log(`${method} ${url} - ${Date.now() - now}ms`);
+      }),
+    );
+  }
+}","import { Controller, Get, Logger } from '@nestjs/common';
+
+@Controller('users')
+export class UsersController {
+  private logger = new Logger('UsersController');
+
+  @Get()
+  findAll() {
+    // BAD: Logging duplicated in every handler
+    const start = Date.now();
+    this.logger.log('GET /users started');
+    const result = this.usersService.findAll();
+    this.logger.log(`GET /users finished in ${Date.now() - start}ms`);
+    return result;
+  }
+}",warning,https://docs.nestjs.com/interceptors
+7,Exception Filters,Use @Catch for custom error handling,"Exception filters catch unhandled exceptions and transform them into user-friendly responses. Use HttpException subclasses and custom filters for consistent error shapes.",Create custom exception filters implementing ExceptionFilter interface,Throw raw Error objects or catch exceptions with try-catch in every handler,"import { ExceptionFilter, Catch, ArgumentsHost, HttpException, HttpStatus, Logger } from '@nestjs/common';
+import { Request, Response } from 'express';
+
+@Catch()
+export class AllExceptionsFilter implements ExceptionFilter {
+  private readonly logger = new Logger(AllExceptionsFilter.name);
+
+  catch(exception: unknown, host: ArgumentsHost) {
+    const ctx = host.switchToHttp();
+    const response = ctx.getResponse<Response>();
+    const request = ctx.getRequest<Request>();
+
+    const status = exception instanceof HttpException
+      ? exception.getStatus()
+      : HttpStatus.INTERNAL_SERVER_ERROR;
+
+    const message = exception instanceof HttpException
+      ? exception.getResponse()
+      : 'Internal server error';
+
+    this.logger.error(`${request.method} ${request.url}`, exception instanceof Error ? exception.stack : '');
+
+    response.status(status).json({
+      statusCode: status,
+      timestamp: new Date().toISOString(),
+      path: request.url,
+      message,
+    });
+  }
+}","import { Controller, Get, Res } from '@nestjs/common';
+import { Response } from 'express';
+
+@Controller('users')
+export class UsersController {
+  @Get()
+  async findAll(@Res() res: Response) {
+    try {
+      const users = await this.usersService.findAll();
+      res.json(users);
+    } catch (err) {
+      // BAD: Manual try-catch in every handler, inconsistent error shape
+      res.status(500).json({ error: err.message });
+    }
+  }
+}",error,https://docs.nestjs.com/exception-filters
+8,DTOs,Define DTOs with class-validator decorators for input validation,"Data Transfer Objects define the shape of incoming data. Use class-validator decorators for automatic validation when combined with ValidationPipe.",Create separate DTOs for create/update operations with proper decorators,Use raw interfaces or any type for request bodies,"import { IsEmail, IsString, MinLength, IsOptional } from 'class-validator';
+
+export class CreateUserDto {
+  @IsString()
+  @MinLength(2)
+  name: string;
+
+  @IsEmail()
+  email: string;
+
+  @IsString()
+  @MinLength(8)
+  password: string;
+}
+
+export class UpdateUserDto {
+  @IsOptional()
+  @IsString()
+  @MinLength(2)
+  name?: string;
+
+  @IsOptional()
+  @IsEmail()
+  email?: string;
+}","// BAD: No validation, no type safety
+interface CreateUserDto {
+  name: string;
+  email: string;
+  password: string;
+}
+
+// Interfaces cannot be validated at runtime by ValidationPipe
+// class-validator decorators only work on classes",warning,https://docs.nestjs.com/techniques/validation
+9,Custom Decorators,Use createParamDecorator for reusable param extractors,"Custom decorators reduce boilerplate by extracting common parameter logic. Use createParamDecorator for request-derived data like current user.",Create typed custom decorators for frequently extracted request data,Repeat the same extraction logic across multiple handlers,"import { createParamDecorator, ExecutionContext } from '@nestjs/common';
+
+export interface AuthUser {
+  id: string;
+  email: string;
+  roles: string[];
+}
+
+export const CurrentUser = createParamDecorator(
+  (data: keyof AuthUser | undefined, ctx: ExecutionContext): AuthUser | any => {
+    const request = ctx.switchToHttp().getRequest();
+    const user = request.user as AuthUser;
+    return data ? user?.[data] : user;
+  },
+);
+
+// Usage in controller:
+// @Get('profile')
+// getProfile(@CurrentUser() user: AuthUser) { return user; }
+// @Get('my-id')
+// getMyId(@CurrentUser('id') userId: string) { return userId; }","import { Controller, Get, Req } from '@nestjs/common';
+
+@Controller('profile')
+export class ProfileController {
+  @Get()
+  getProfile(@Req() req: any) {
+    // BAD: Duplicated extraction logic, no type safety
+    const user = req.user;
+    return user;
+  }
+
+  @Get('id')
+  getMyId(@Req() req: any) {
+    return req.user.id;
+  }
+}",warning,https://docs.nestjs.com/custom-decorators
+10,Dependency Injection,Use constructor injection with proper scoping,"NestJS DI system resolves dependencies via constructor parameters. Use standard constructor injection for singletons and understand request-scoped providers when needed.",Use constructor injection and let NestJS resolve dependencies automatically,"Instantiate dependencies manually with new, or use property injection without clear reason","import { Injectable } from '@nestjs/common';
+import { PrismaService } from '../prisma/prisma.service';
+import { MailService } from '../mail/mail.service';
+
+@Injectable()
+export class UsersService {
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly mailService: MailService,
+  ) {}
+
+  async createUser(data: { email: string; name: string }) {
+    const user = await this.prisma.user.create({ data });
+    await this.mailService.sendWelcome(user.email);
+    return user;
+  }
+}","import { Injectable } from '@nestjs/common';
+import { PrismaClient } from '@prisma/client';
+import { MailService } from '../mail/mail.service';
+
+@Injectable()
+export class UsersService {
+  // BAD: Manual instantiation bypasses DI, untestable, no lifecycle mgmt
+  private prisma = new PrismaClient();
+  private mailService = new MailService();
+
+  async createUser(data: { email: string; name: string }) {
+    const user = await this.prisma.user.create({ data });
+    await this.mailService.sendWelcome(user.email);
+    return user;
+  }
+}",error,https://docs.nestjs.com/fundamentals/custom-providers
+11,Configuration,Use @nestjs/config with Zod schema validation,"Centralize configuration using ConfigModule with validation to fail fast on missing or invalid environment variables at startup.",Validate all env vars at startup with a Zod schema and use ConfigService for access,Access process.env directly throughout the codebase,"import { z } from 'zod';
+import { Module } from '@nestjs/common';
+import { ConfigModule } from '@nestjs/config';
+
+const envSchema = z.object({
+  DATABASE_URL: z.string().url(),
+  JWT_SECRET: z.string().min(32),
+  PORT: z.coerce.number().default(3000),
+  NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
+});
+
+@Module({
+  imports: [
+    ConfigModule.forRoot({
+      isGlobal: true,
+      validate: (config) => envSchema.parse(config),
+    }),
+  ],
+})
+export class AppModule {}
+
+// Usage in a service:
+// constructor(private config: ConfigService) {}
+// const secret = this.config.get<string>('JWT_SECRET');","import { Injectable } from '@nestjs/common';
+
+@Injectable()
+export class AuthService {
+  // BAD: Direct process.env access, no validation, no type safety
+  private secret = process.env.JWT_SECRET || 'default-secret';
+  private dbUrl = process.env.DATABASE_URL!;
+
+  // Missing env var only discovered at runtime when used
+}",error,https://docs.nestjs.com/techniques/configuration
+12,Database (Prisma),Provide PrismaClient as a NestJS service with proper lifecycle,"Wrap PrismaClient in an @Injectable service that implements OnModuleInit for connection and enableShutdownHooks for graceful cleanup.",Create a dedicated PrismaModule with PrismaService extending PrismaClient,Create new PrismaClient instances in every service or import it globally without a module,"import { Injectable, OnModuleInit } from '@nestjs/common';
+import { PrismaClient } from '@prisma/client';
+
+@Injectable()
+export class PrismaService extends PrismaClient implements OnModuleInit {
+  async onModuleInit() {
+    await this.$connect();
+  }
+}
+
+// prisma.module.ts
+import { Global, Module } from '@nestjs/common';
+import { PrismaService } from './prisma.service';
+
+@Global()
+@Module({
+  providers: [PrismaService],
+  exports: [PrismaService],
+})
+export class PrismaModule {}","import { Injectable } from '@nestjs/common';
+import { PrismaClient } from '@prisma/client';
+
+@Injectable()
+export class UsersService {
+  // BAD: New PrismaClient per service = multiple connections, no lifecycle
+  private prisma = new PrismaClient();
+
+  async findAll() {
+    return this.prisma.user.findMany();
+  }
+}",error,https://docs.nestjs.com/recipes/prisma
+13,Authentication,Use @nestjs/passport with JWT strategy,"Implement authentication using Passport strategies. JwtStrategy validates tokens and attaches user to request. Combine with AuthGuard for route protection.",Use PassportStrategy with JwtStrategy and a dedicated AuthModule,Implement raw JWT verification logic in every guard or controller,"import { Injectable } from '@nestjs/common';
+import { PassportStrategy } from '@nestjs/passport';
+import { ExtractJwt, Strategy } from 'passport-jwt';
+import { ConfigService } from '@nestjs/config';
+
+interface JwtPayload {
+  sub: string;
+  email: string;
+}
+
+@Injectable()
+export class JwtStrategy extends PassportStrategy(Strategy) {
+  constructor(config: ConfigService) {
+    super({
+      jwtFromRequest: ExtractJwt.fromAuthHeaderAsBearerToken(),
+      ignoreExpiration: false,
+      secretOrKey: config.get<string>('JWT_SECRET'),
+    });
+  }
+
+  validate(payload: JwtPayload) {
+    return { id: payload.sub, email: payload.email };
+  }
+}","import { Injectable, CanActivate, ExecutionContext } from '@nestjs/common';
+import * as jwt from 'jsonwebtoken';
+
+@Injectable()
+export class AuthGuard implements CanActivate {
+  // BAD: Raw JWT handling, hardcoded secret, no strategy pattern
+  canActivate(context: ExecutionContext): boolean {
+    const req = context.switchToHttp().getRequest();
+    try {
+      const token = req.headers.authorization.split(' ')[1];
+      req.user = jwt.verify(token, 'hardcoded-secret');
+      return true;
+    } catch {
+      return false;
+    }
+  }
+}",error,https://docs.nestjs.com/recipes/passport
+14,Authorization (RBAC),Implement role-based access with a roles guard and metadata,"Use SetMetadata to attach required roles to handlers and a RolesGuard to check them. Combine with Reflector for metadata access.",Use custom @Roles decorator with SetMetadata and a RolesGuard using Reflector,Hardcode role checks inside controller methods,"import { SetMetadata, Injectable, CanActivate, ExecutionContext } from '@nestjs/common';
+import { Reflector } from '@nestjs/core';
+
+export const ROLES_KEY = 'roles';
+export const Roles = (...roles: string[]) => SetMetadata(ROLES_KEY, roles);
+
+@Injectable()
+export class RolesGuard implements CanActivate {
+  constructor(private readonly reflector: Reflector) {}
+
+  canActivate(context: ExecutionContext): boolean {
+    const requiredRoles = this.reflector.getAllAndOverride<string[]>(ROLES_KEY, [
+      context.getHandler(),
+      context.getClass(),
+    ]);
+    if (!requiredRoles) return true;
+    const { user } = context.switchToHttp().getRequest();
+    return requiredRoles.some((role) => user.roles?.includes(role));
+  }
+}
+
+// Usage: @Roles('admin') @UseGuards(AuthGuard, RolesGuard)","import { Controller, Get, Req } from '@nestjs/common';
+
+@Controller('admin')
+export class AdminController {
+  @Get('dashboard')
+  getDashboard(@Req() req: any) {
+    // BAD: Hardcoded role check in every handler
+    if (!req.user.roles.includes('admin')) {
+      throw new Error('Forbidden');
+    }
+    return this.adminService.getDashboard();
+  }
+}",error,https://docs.nestjs.com/guards#role-based-authentication
+15,Swagger/OpenAPI,Decorate controllers and DTOs with @nestjs/swagger,"Use @ApiTags, @ApiOperation, @ApiResponse on controllers and @ApiProperty on DTOs to generate accurate OpenAPI documentation automatically.",Add Swagger decorators to all public endpoints and DTOs,Rely on auto-inference alone or skip API documentation entirely,"import { Controller, Get, Post, Body } from '@nestjs/common';
+import { ApiTags, ApiOperation, ApiResponse, ApiProperty } from '@nestjs/swagger';
+import { IsString, IsEmail } from 'class-validator';
+
+class CreateUserDto {
+  @ApiProperty({ example: 'John Doe' })
+  @IsString()
+  name: string;
+
+  @ApiProperty({ example: 'john@example.com' })
+  @IsEmail()
+  email: string;
+}
+
+@ApiTags('Users')
+@Controller('users')
+export class UsersController {
+  @Post()
+  @ApiOperation({ summary: 'Create a new user' })
+  @ApiResponse({ status: 201, description: 'User created successfully' })
+  @ApiResponse({ status: 400, description: 'Invalid input' })
+  create(@Body() dto: CreateUserDto) {
+    return this.usersService.create(dto);
+  }
+}","import { Controller, Post, Body } from '@nestjs/common';
+
+// BAD: No Swagger decorators, no documentation generated
+@Controller('users')
+export class UsersController {
+  @Post()
+  create(@Body() dto: any) {
+    return this.usersService.create(dto);
+  }
+}",warning,https://docs.nestjs.com/openapi/introduction
+16,Middleware,Apply middleware using consumer.apply().forRoutes(),"Middleware runs before route handlers and guards. Use functional or class-based middleware for tasks like request logging, CORS, or header manipulation.",Use NestMiddleware class or function with proper forRoutes configuration,Use Express middleware directly in main.ts for everything or duplicate logic,"import { Injectable, NestMiddleware, Logger } from '@nestjs/common';
+import { Request, Response, NextFunction } from 'express';
+
+@Injectable()
+export class CorrelationIdMiddleware implements NestMiddleware {
+  private readonly logger = new Logger(CorrelationIdMiddleware.name);
+
+  use(req: Request, _res: Response, next: NextFunction) {
+    const correlationId = req.headers['x-correlation-id'] as string
+      ?? crypto.randomUUID();
+    req.headers['x-correlation-id'] = correlationId;
+    this.logger.log(`[${correlationId}] ${req.method} ${req.url}`);
+    next();
+  }
+}
+
+// In AppModule:
+// configure(consumer: MiddlewareConsumer) {
+//   consumer.apply(CorrelationIdMiddleware).forRoutes('*');
+// }","import { NestFactory } from '@nestjs/core';
+
+async function bootstrap() {
+  const app = await NestFactory.create(AppModule);
+  // BAD: All middleware shoved into main.ts, not composable
+  app.use((req: any, _res: any, next: any) => {
+    req.headers['x-correlation-id'] = Math.random().toString();
+    console.log(req.method, req.url);
+    next();
+  });
+}",warning,https://docs.nestjs.com/middleware
+17,CQRS,Separate commands and queries with @nestjs/cqrs,"Use the CQRS pattern to separate read and write operations. Commands mutate state, queries read state, and events communicate side effects.",Use CommandBus/QueryBus with dedicated handlers for each operation,Mix read and write logic in a single service method,"import { CommandHandler, ICommandHandler, QueryHandler, IQueryHandler } from '@nestjs/cqrs';
+
+export class CreateUserCommand {
+  constructor(
+    public readonly name: string,
+    public readonly email: string,
+  ) {}
+}
+
+@CommandHandler(CreateUserCommand)
+export class CreateUserHandler implements ICommandHandler<CreateUserCommand> {
+  constructor(private readonly prisma: PrismaService) {}
+
+  async execute(command: CreateUserCommand) {
+    return this.prisma.user.create({
+      data: { name: command.name, email: command.email },
+    });
+  }
+}
+
+export class GetUserQuery {
+  constructor(public readonly id: string) {}
+}
+
+@QueryHandler(GetUserQuery)
+export class GetUserHandler implements IQueryHandler<GetUserQuery> {
+  constructor(private readonly prisma: PrismaService) {}
+
+  async execute(query: GetUserQuery) {
+    return this.prisma.user.findUnique({ where: { id: query.id } });
+  }
+}","import { Injectable } from '@nestjs/common';
+
+@Injectable()
+export class UsersService {
+  // BAD: Single method mixes command and query concerns
+  async createAndReturnAll(data: any) {
+    await this.prisma.user.create({ data });
+    return this.prisma.user.findMany(); // Side effect + query mixed
+  }
+}",info,https://docs.nestjs.com/recipes/cqrs
+18,Microservices,Use @nestjs/microservices with typed message patterns,"Build microservices using NestJS transport layers (TCP, Redis, NATS, etc.). Define message patterns with @MessagePattern and event patterns with @EventPattern.",Use @MessagePattern/@EventPattern decorators with strongly typed payloads,Use raw HTTP calls between services or untyped message patterns,"import { Controller } from '@nestjs/common';
+import { MessagePattern, EventPattern, Payload } from '@nestjs/microservices';
+
+interface CreateOrderPayload {
+  userId: string;
+  items: Array<{ productId: string; quantity: number }>;
+}
+
+@Controller()
+export class OrdersController {
+  @MessagePattern({ cmd: 'create_order' })
+  async createOrder(@Payload() data: CreateOrderPayload) {
+    return this.ordersService.create(data);
+  }
+
+  @EventPattern('order_completed')
+  async handleOrderCompleted(@Payload() data: { orderId: string }) {
+    await this.ordersService.notifyShipping(data.orderId);
+  }
+}","import { Controller, Post, Body } from '@nestjs/common';
+import axios from 'axios';
+
+@Controller('orders')
+export class OrdersController {
+  @Post()
+  async createOrder(@Body() data: any) {
+    // BAD: Direct HTTP calls between services, no transport abstraction
+    const inventory = await axios.post('http://inventory-service:3001/check', data);
+    const payment = await axios.post('http://payment-service:3002/charge', data);
+    return { inventory: inventory.data, payment: payment.data };
+  }
+}",warning,https://docs.nestjs.com/microservices/basics
+19,WebSocket Gateway,Use @WebSocketGateway with typed events,"Implement real-time communication using WebSocket gateways. Use @SubscribeMessage for event handling and proper namespace/room management.",Use @WebSocketGateway with @SubscribeMessage and proper typing for events,Use raw ws/socket.io library without NestJS integration,"import {
+  WebSocketGateway,
+  WebSocketServer,
+  SubscribeMessage,
+  MessageBody,
+  ConnectedSocket,
+  OnGatewayConnection,
+} from '@nestjs/websockets';
+import { Server, Socket } from 'socket.io';
+
+interface ChatMessage {
+  room: string;
+  text: string;
+  sender: string;
+}
+
+@WebSocketGateway({ namespace: 'chat', cors: { origin: '*' } })
+export class ChatGateway implements OnGatewayConnection {
+  @WebSocketServer()
+  server: Server;
+
+  handleConnection(client: Socket) {
+    console.log(`Client connected: ${client.id}`);
+  }
+
+  @SubscribeMessage('joinRoom')
+  handleJoin(@ConnectedSocket() client: Socket, @MessageBody() room: string) {
+    client.join(room);
+    this.server.to(room).emit('userJoined', { userId: client.id });
+  }
+
+  @SubscribeMessage('message')
+  handleMessage(@MessageBody() data: ChatMessage) {
+    this.server.to(data.room).emit('message', data);
+  }
+}","import { Server } from 'socket.io';
+
+// BAD: Raw socket.io without NestJS lifecycle, DI, or guards
+const io = new Server(3001);
+io.on('connection', (socket) => {
+  socket.on('message', (data) => {
+    io.emit('message', data);
+  });
+});",warning,https://docs.nestjs.com/websockets/gateways
+20,Testing,Use Test.createTestingModule for isolated unit tests,"Create testing modules with overridden providers to isolate units under test. Use Jest with NestJS testing utilities for both unit and e2e tests.",Use createTestingModule with mocked dependencies for unit tests,Test with real database connections or without proper module setup,"import { Test, TestingModule } from '@nestjs/testing';
+import { UsersService } from './users.service';
+import { PrismaService } from '../prisma/prisma.service';
+
+describe('UsersService', () => {
+  let service: UsersService;
+  let prisma: jest.Mocked<PrismaService>;
+
+  beforeEach(async () => {
+    const module: TestingModule = await Test.createTestingModule({
+      providers: [
+        UsersService,
+        {
+          provide: PrismaService,
+          useValue: {
+            user: {
+              findUnique: jest.fn(),
+              create: jest.fn(),
+              findMany: jest.fn(),
+            },
+          },
+        },
+      ],
+    }).compile();
+
+    service = module.get(UsersService);
+    prisma = module.get(PrismaService);
+  });
+
+  it('should find a user by id', async () => {
+    const mockUser = { id: '1', name: 'John', email: 'john@test.com' };
+    prisma.user.findUnique.mockResolvedValue(mockUser as any);
+
+    const result = await service.findOne('1');
+    expect(result).toEqual(mockUser);
+    expect(prisma.user.findUnique).toHaveBeenCalledWith({ where: { id: '1' } });
+  });
+});","import { UsersService } from './users.service';
+import { PrismaService } from '../prisma/prisma.service';
+
+// BAD: No testing module, real dependencies, no isolation
+describe('UsersService', () => {
+  it('should find a user', async () => {
+    const prisma = new PrismaService(); // Real DB connection!
+    const service = new UsersService(prisma);
+    const user = await service.findOne('1'); // Hits real database
+    expect(user).toBeDefined();
+  });
+});",error,https://docs.nestjs.com/fundamentals/testing
+21,Health Check,Use @nestjs/terminus for health check endpoints,"Implement health checks using @nestjs/terminus to expose /health endpoints for load balancers, Kubernetes probes, and monitoring systems.",Use HealthCheckService with typed indicators (Prisma, HTTP, disk, memory),Create custom health endpoints that return 200 without actually checking dependencies,"import { Controller, Get } from '@nestjs/common';
+import { HealthCheck, HealthCheckService, HttpHealthIndicator, HealthCheckResult } from '@nestjs/terminus';
+import { PrismaHealthIndicator } from './prisma.health';
+
+@Controller('health')
+export class HealthController {
+  constructor(
+    private readonly health: HealthCheckService,
+    private readonly http: HttpHealthIndicator,
+    private readonly prisma: PrismaHealthIndicator,
+  ) {}
+
+  @Get()
+  @HealthCheck()
+  check(): Promise<HealthCheckResult> {
+    return this.health.check([
+      () => this.prisma.isHealthy('database'),
+      () => this.http.pingCheck('api-docs', 'https://docs.nestjs.com'),
+    ]);
+  }
+}","import { Controller, Get } from '@nestjs/common';
+
+@Controller('health')
+export class HealthController {
+  @Get()
+  check() {
+    // BAD: Always returns OK without checking actual dependencies
+    return { status: 'ok' };
+  }
+}",warning,https://docs.nestjs.com/recipes/terminus
+22,Task Scheduling,Use @nestjs/schedule with @Cron for scheduled tasks,"Implement recurring jobs using @nestjs/schedule. Use @Cron with cron expressions or @Interval for repeated tasks with proper error handling.",Use @Cron decorator with named jobs and proper error handling,Use setInterval or external cron without NestJS integration,"import { Injectable, Logger } from '@nestjs/common';
+import { Cron, CronExpression } from '@nestjs/schedule';
+
+@Injectable()
+export class TasksService {
+  private readonly logger = new Logger(TasksService.name);
+
+  @Cron(CronExpression.EVERY_DAY_AT_MIDNIGHT, { name: 'cleanupExpiredSessions' })
+  async handleSessionCleanup() {
+    this.logger.log('Running expired session cleanup...');
+    try {
+      const result = await this.prisma.session.deleteMany({
+        where: { expiresAt: { lt: new Date() } },
+      });
+      this.logger.log(`Deleted ${result.count} expired sessions`);
+    } catch (error) {
+      this.logger.error('Session cleanup failed', error);
+    }
+  }
+
+  @Cron('0 */6 * * *', { name: 'syncExternalData' })
+  async handleDataSync() {
+    this.logger.log('Syncing external data...');
+    // sync logic
+  }
+}","import { Injectable } from '@nestjs/common';
+
+@Injectable()
+export class TasksService {
+  constructor() {
+    // BAD: Raw setInterval, no lifecycle management, no error handling
+    setInterval(async () => {
+      const prisma = new (require('@prisma/client').PrismaClient)();
+      await prisma.session.deleteMany({ where: { expiresAt: { lt: new Date() } } });
+    }, 86400000);
+  }
+}",warning,https://docs.nestjs.com/techniques/task-scheduling
+23,Event Emitter,Use @nestjs/event-emitter for decoupled event handling,"Emit and handle domain events to decouple modules. Use typed events with @OnEvent for loose coupling between features.",Define typed event classes and use @OnEvent with async handlers,Call services directly across module boundaries creating tight coupling,"import { Injectable } from '@nestjs/common';
+import { EventEmitter2 } from '@nestjs/event-emitter';
+import { OnEvent } from '@nestjs/event-emitter';
+
+export class UserCreatedEvent {
+  constructor(
+    public readonly userId: string,
+    public readonly email: string,
+  ) {}
+}
+
+@Injectable()
+export class UsersService {
+  constructor(private readonly eventEmitter: EventEmitter2) {}
+
+  async create(data: { name: string; email: string }) {
+    const user = await this.prisma.user.create({ data });
+    this.eventEmitter.emit('user.created', new UserCreatedEvent(user.id, user.email));
+    return user;
+  }
+}
+
+@Injectable()
+export class NotificationListener {
+  @OnEvent('user.created')
+  async handleUserCreated(event: UserCreatedEvent) {
+    await this.mailService.sendWelcome(event.email);
+  }
+}","import { Injectable } from '@nestjs/common';
+import { MailService } from '../mail/mail.service';
+import { AnalyticsService } from '../analytics/analytics.service';
+
+@Injectable()
+export class UsersService {
+  // BAD: Tight coupling to multiple unrelated services
+  constructor(
+    private readonly mailService: MailService,
+    private readonly analyticsService: AnalyticsService,
+    private readonly billingService: BillingService,
+  ) {}
+
+  async create(data: any) {
+    const user = await this.prisma.user.create({ data });
+    await this.mailService.sendWelcome(user.email);
+    await this.analyticsService.track('user_created', user.id);
+    await this.billingService.createAccount(user.id);
+    return user;
+  }
+}",info,https://docs.nestjs.com/techniques/events
+24,Lifecycle Hooks,Implement OnModuleInit and OnModuleDestroy for resource management,"Use NestJS lifecycle hooks to initialize resources on startup and clean them up on shutdown. Essential for database connections, caches, and external clients.",Implement OnModuleInit/OnModuleDestroy interfaces for proper resource lifecycle,Initialize resources in constructors or forget to clean up on shutdown,"import { Injectable, OnModuleInit, OnModuleDestroy, Logger } from '@nestjs/common';
+import { Redis } from 'ioredis';
+import { ConfigService } from '@nestjs/config';
+
+@Injectable()
+export class RedisService implements OnModuleInit, OnModuleDestroy {
+  private readonly logger = new Logger(RedisService.name);
+  private client: Redis;
+
+  constructor(private readonly config: ConfigService) {}
+
+  async onModuleInit() {
+    this.client = new Redis(this.config.get<string>('REDIS_URL')!);
+    this.client.on('connect', () => this.logger.log('Redis connected'));
+    this.client.on('error', (err) => this.logger.error('Redis error', err));
+  }
+
+  async onModuleDestroy() {
+    await this.client.quit();
+    this.logger.log('Redis disconnected');
+  }
+
+  getClient(): Redis {
+    return this.client;
+  }
+}","import { Injectable } from '@nestjs/common';
+import { Redis } from 'ioredis';
+
+@Injectable()
+export class RedisService {
+  // BAD: Connection in constructor, no cleanup, no error handling
+  private client = new Redis(process.env.REDIS_URL!);
+
+  getClient() {
+    return this.client;
+  }
+  // Connection never closed on shutdown -> resource leak
+}",error,https://docs.nestjs.com/fundamentals/lifecycle-events
+25,Circular Dependency,Use forwardRef() to resolve circular dependencies,"When two providers depend on each other, use forwardRef() to break the circular reference. Better yet, refactor to eliminate circular deps when possible.",Use forwardRef() as a last resort and prefer restructuring to remove circularity,Ignore circular dependency warnings or restructure modules to hide the cycle,"import { Injectable, Inject, forwardRef } from '@nestjs/common';
+
+@Injectable()
+export class UsersService {
+  constructor(
+    @Inject(forwardRef(() => OrdersService))
+    private readonly ordersService: OrdersService,
+  ) {}
+
+  async getUserWithOrders(userId: string) {
+    const user = await this.prisma.user.findUnique({ where: { id: userId } });
+    const orders = await this.ordersService.findByUser(userId);
+    return { ...user, orders };
+  }
+}
+
+@Injectable()
+export class OrdersService {
+  constructor(
+    @Inject(forwardRef(() => UsersService))
+    private readonly usersService: UsersService,
+  ) {}
+
+  async findByUser(userId: string) {
+    return this.prisma.order.findMany({ where: { userId } });
+  }
+}
+
+// BETTER: Extract shared logic into a third service to eliminate the cycle","import { Injectable } from '@nestjs/common';
+
+// BAD: Circular dependency with no resolution -> runtime error
+@Injectable()
+export class UsersService {
+  // This will crash at runtime:
+  // Error: Nest cannot create the UsersService instance.
+  constructor(private readonly ordersService: OrdersService) {}
+}
+
+@Injectable()
+export class OrdersService {
+  constructor(private readonly usersService: UsersService) {}
+}",error,https://docs.nestjs.com/fundamentals/circular-dependency

@@ -1,0 +1,770 @@
+No,Pattern Name,Category,Keywords,Description,Setup,Code Example,Common Mistake,Package,Docs URL
+1,Vitest Unit Testing Setup,Unit Testing,"vitest, unit, setup, config, typescript","Vitest is a fast Vite-powered test runner with native TypeScript support, Jest-compatible API, and built-in coverage.","npm install -D vitest @vitest/coverage-v8
+Add ""test"": ""vitest"" and ""test:coverage"": ""vitest run --coverage"" to package.json scripts. Create vitest.config.ts.","// vitest.config.ts
+import { defineConfig } from 'vitest/config';
+
+export default defineConfig({
+  test: {
+    globals: true,
+    environment: 'node',
+    coverage: {
+      provider: 'v8',
+      reporter: ['text', 'lcov'],
+    },
+  },
+});
+
+// math.test.ts
+import { describe, it, expect } from 'vitest';
+import { add } from './math';
+
+describe('add', () => {
+  it('should add two numbers', () => {
+    expect(add(1, 2)).toBe(3);
+  });
+
+  it('should handle negative numbers', () => {
+    expect(add(-1, -2)).toBe(-3);
+  });
+});","Forgetting to set globals: true in vitest.config.ts and then not importing describe/it/expect in test files, leading to 'describe is not defined' errors.",vitest,https://vitest.dev/guide/
+2,Jest Unit Testing Setup,Unit Testing,"jest, unit, setup, config, typescript","Jest is a widely-used test framework with built-in assertion library, mocking, and code coverage. Requires ts-jest or @swc/jest for TypeScript.","npm install -D jest @types/jest ts-jest
+Run npx ts-jest config:init to generate jest.config.ts. Add ""test"": ""jest"" to package.json scripts.","// jest.config.ts
+import type { Config } from 'jest';
+
+const config: Config = {
+  preset: 'ts-jest',
+  testEnvironment: 'node',
+  roots: ['<rootDir>/src'],
+  collectCoverageFrom: ['src/**/*.ts', '!src/**/*.d.ts'],
+};
+
+export default config;
+
+// user.service.test.ts
+import { UserService } from './user.service';
+
+describe('UserService', () => {
+  it('should create a user', async () => {
+    const service = new UserService(mockRepo);
+    const user = await service.create({ name: 'Jane', email: 'jane@test.com' });
+    expect(user.name).toBe('Jane');
+  });
+});","Using ts-jest without proper tsconfig settings. Ensure tsconfig has ""module"": ""commonjs"" for Jest or use @swc/jest for ESM projects.",jest,https://jestjs.io/docs/getting-started
+3,HTTP Integration Testing (supertest),Integration Testing,"supertest, http, integration, api, express","Supertest allows you to test HTTP endpoints by sending real requests to your Express/Fastify app without starting a listening server.","npm install -D supertest @types/supertest
+Export your Express app instance separately from the server.listen() call so supertest can use it directly.","import request from 'supertest';
+import { describe, it, expect } from 'vitest';
+import { app } from '../app';
+
+describe('GET /api/users', () => {
+  it('should return a list of users', async () => {
+    const response = await request(app)
+      .get('/api/users')
+      .set('Authorization', 'Bearer test-token')
+      .expect('Content-Type', /json/)
+      .expect(200);
+
+    expect(response.body).toBeInstanceOf(Array);
+    expect(response.body[0]).toHaveProperty('name');
+  });
+
+  it('should return 401 without auth', async () => {
+    await request(app)
+      .get('/api/users')
+      .expect(401);
+  });
+});","Calling app.listen() in the same file as the app definition. This starts a real server during tests and causes port conflicts. Separate app creation from server startup.",supertest,https://github.com/ladjs/supertest#readme
+4,Mocking with vi.mock,Unit Testing,"vitest, mock, vi, module, dependency","Use vi.mock to mock entire modules in Vitest. Mocks are hoisted to the top of the file automatically.","No extra setup needed. vi.mock is available globally when using Vitest. Use vi.fn() for individual function mocks.","import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { getUser } from './user.service';
+
+vi.mock('./user.repository', () => ({
+  findUserById: vi.fn(),
+}));
+
+import { findUserById } from './user.repository';
+
+const mockFindUserById = vi.mocked(findUserById);
+
+describe('getUser', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('should return user when found', async () => {
+    mockFindUserById.mockResolvedValue({ id: '1', name: 'Jane' });
+    const user = await getUser('1');
+    expect(user).toEqual({ id: '1', name: 'Jane' });
+    expect(mockFindUserById).toHaveBeenCalledWith('1');
+  });
+
+  it('should throw when user not found', async () => {
+    mockFindUserById.mockResolvedValue(null);
+    await expect(getUser('999')).rejects.toThrow('User not found');
+  });
+});","Forgetting to call vi.clearAllMocks() in beforeEach, causing mock state to leak between tests and produce flaky results.",vitest,https://vitest.dev/api/vi.html#vi-mock
+5,Mocking with jest.mock,Unit Testing,"jest, mock, module, dependency, spy","Use jest.mock to mock entire modules in Jest. Mocks are automatically hoisted to the top of the file.","No extra setup needed. jest.mock is available globally. Use jest.fn() for individual mocks and jest.spyOn for partial mocking.","import { getUser } from './user.service';
+
+jest.mock('./user.repository', () => ({
+  findUserById: jest.fn(),
+}));
+
+import { findUserById } from './user.repository';
+
+const mockFindUserById = findUserById as jest.MockedFunction<typeof findUserById>;
+
+describe('getUser', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  it('should return user when found', async () => {
+    mockFindUserById.mockResolvedValue({ id: '1', name: 'Jane' });
+    const user = await getUser('1');
+    expect(user).toEqual({ id: '1', name: 'Jane' });
+    expect(mockFindUserById).toHaveBeenCalledWith('1');
+  });
+
+  it('should throw when not found', async () => {
+    mockFindUserById.mockResolvedValue(null);
+    await expect(getUser('999')).rejects.toThrow('User not found');
+  });
+});","Using jest.mock inside a describe block or test. jest.mock calls are hoisted to the top of the file regardless of placement, which causes confusing behavior if you expect scoped mocking.",jest,https://jestjs.io/docs/mock-functions
+6,Test Containers (testcontainers-node),Integration Testing,"testcontainers, docker, database, integration, container","Use testcontainers to spin up real Docker containers (PostgreSQL, Redis, etc.) for integration tests, ensuring tests run against real infrastructure.","npm install -D testcontainers
+Docker must be running on the CI/dev machine. Tests may take longer to start but are highly reliable.","import { PostgreSqlContainer, StartedPostgreSqlContainer } from '@testcontainers/postgresql';
+import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { PrismaClient } from '@prisma/client';
+
+let container: StartedPostgreSqlContainer;
+let prisma: PrismaClient;
+
+beforeAll(async () => {
+  container = await new PostgreSqlContainer()
+    .withDatabase('testdb')
+    .start();
+
+  prisma = new PrismaClient({
+    datasources: {
+      db: { url: container.getConnectionUri() },
+    },
+  });
+  await prisma.$connect();
+}, 60_000);
+
+afterAll(async () => {
+  await prisma.$disconnect();
+  await container.stop();
+});
+
+describe('UserRepository', () => {
+  it('should create and find user', async () => {
+    const user = await prisma.user.create({
+      data: { name: 'Jane', email: 'jane@test.com' },
+    });
+    const found = await prisma.user.findUnique({ where: { id: user.id } });
+    expect(found?.name).toBe('Jane');
+  });
+});","Forgetting to increase the test timeout for container startup. Containers can take 10-30 seconds to start. Set a high timeout on beforeAll.",testcontainers,https://node.testcontainers.org/
+7,E2E Testing (Playwright),E2E Testing,"playwright, e2e, browser, end-to-end, ui","Playwright provides cross-browser end-to-end testing with auto-waiting, network interception, and built-in test runner.","npm init playwright@latest
+This scaffolds playwright.config.ts and a tests directory. Install browsers with npx playwright install.","// playwright.config.ts
+import { defineConfig } from '@playwright/test';
+
+export default defineConfig({
+  testDir: './e2e',
+  use: {
+    baseURL: 'http://localhost:3000',
+    screenshot: 'only-on-failure',
+    trace: 'on-first-retry',
+  },
+  webServer: {
+    command: 'npm run dev',
+    port: 3000,
+    reuseExistingServer: !process.env.CI,
+  },
+});
+
+// e2e/login.spec.ts
+import { test, expect } from '@playwright/test';
+
+test('user can log in', async ({ page }) => {
+  await page.goto('/login');
+  await page.fill('[name=""email""]', 'jane@example.com');
+  await page.fill('[name=""password""]', 'password123');
+  await page.click('button[type=""submit""]');
+  await expect(page.locator('h1')).toContainText('Dashboard');
+});","Writing flaky selectors like div:nth-child(3) > span. Use data-testid attributes or accessible roles (getByRole) for stable element selection.",@playwright/test,https://playwright.dev/docs/intro
+8,Snapshot Testing,Unit Testing,"snapshot, regression, serialization, inline, toMatchSnapshot","Snapshot tests capture the output of a function or component and compare against a stored snapshot file, making it easy to detect unexpected changes.","No extra setup for Vitest or Jest. Snapshots are stored in __snapshots__ directories automatically.","import { describe, it, expect } from 'vitest';
+import { renderEmail } from './email-template';
+
+describe('renderEmail', () => {
+  it('should match welcome email snapshot', () => {
+    const html = renderEmail({
+      type: 'welcome',
+      name: 'Jane',
+      activationUrl: 'https://example.com/activate/abc',
+    });
+    expect(html).toMatchSnapshot();
+  });
+
+  it('should match inline snapshot', () => {
+    const greeting = formatGreeting('Jane');
+    expect(greeting).toMatchInlineSnapshot('""Hello, Jane! Welcome aboard.""');
+  });
+});","Blindly updating snapshots with --update without reviewing the diff. Snapshot tests are only useful if you carefully review changes when updating.",vitest,https://vitest.dev/guide/snapshot.html
+9,Test Fixtures and Factories,Test Data,"fixture, factory, seed, test data, builder","Use fixture files or factory functions to create consistent test data. Factories generate unique but predictable data for each test.","Create a test/factories directory with builder functions for each entity. Use libraries like faker for realistic data.","import { faker } from '@faker-js/faker';
+
+interface User {
+  id: string;
+  name: string;
+  email: string;
+  role: 'admin' | 'editor' | 'viewer';
+}
+
+function buildUser(overrides: Partial<User> = {}): User {
+  return {
+    id: faker.string.uuid(),
+    name: faker.person.fullName(),
+    email: faker.internet.email(),
+    role: 'viewer',
+    ...overrides,
+  };
+}
+
+// Usage in tests
+describe('UserService', () => {
+  it('should promote user to admin', () => {
+    const user = buildUser({ role: 'viewer' });
+    const promoted = promoteToAdmin(user);
+    expect(promoted.role).toBe('admin');
+  });
+});","Hardcoding test data inline in every test. This leads to duplication, inconsistent data, and tests that are hard to maintain when the data shape changes.",@faker-js/faker,https://fakerjs.dev/guide/
+10,Database Seeding for Tests,Integration Testing,"seed, database, test data, setup, teardown","Seed a test database with known data before integration tests and clean up afterward to ensure test isolation.","Create seed functions that insert known data. Use transactions or TRUNCATE for cleanup between tests.","import { PrismaClient } from '@prisma/client';
+import { describe, it, expect, beforeEach, afterAll } from 'vitest';
+
+const prisma = new PrismaClient();
+
+async function seedTestData() {
+  await prisma.user.createMany({
+    data: [
+      { name: 'Alice', email: 'alice@test.com', role: 'admin' },
+      { name: 'Bob', email: 'bob@test.com', role: 'viewer' },
+    ],
+  });
+}
+
+async function cleanDatabase() {
+  const tables = ['User', 'Post', 'Comment'];
+  for (const table of tables) {
+    await prisma.$executeRawUnsafe(`TRUNCATE TABLE ""${table}"" CASCADE`);
+  }
+}
+
+beforeEach(async () => {
+  await cleanDatabase();
+  await seedTestData();
+});
+
+afterAll(async () => {
+  await prisma.$disconnect();
+});
+
+describe('GET /users', () => {
+  it('should return seeded users', async () => {
+    const users = await prisma.user.findMany();
+    expect(users).toHaveLength(2);
+  });
+});","Not cleaning the database between tests, causing tests to depend on execution order and creating flaky test suites.",@prisma/client,https://www.prisma.io/docs/guides/testing/integration-testing
+11,TDD Workflow,Methodology,"tdd, red-green-refactor, test-driven, workflow, methodology","Test-Driven Development follows the Red-Green-Refactor cycle: write a failing test first, make it pass with minimal code, then refactor.",Write the test first. Run it to see it fail. Write the minimum code to pass. Refactor while keeping tests green.,"// Step 1: RED -- write failing test
+import { describe, it, expect } from 'vitest';
+import { FizzBuzz } from './fizzbuzz';
+
+describe('FizzBuzz', () => {
+  it('returns ""Fizz"" for multiples of 3', () => {
+    expect(FizzBuzz(3)).toBe('Fizz');
+    expect(FizzBuzz(9)).toBe('Fizz');
+  });
+
+  it('returns ""Buzz"" for multiples of 5', () => {
+    expect(FizzBuzz(5)).toBe('Buzz');
+  });
+
+  it('returns ""FizzBuzz"" for multiples of 15', () => {
+    expect(FizzBuzz(15)).toBe('FizzBuzz');
+  });
+
+  it('returns the number as string otherwise', () => {
+    expect(FizzBuzz(1)).toBe('1');
+  });
+});
+
+// Step 2: GREEN -- minimal implementation
+export function FizzBuzz(n: number): string {
+  if (n % 15 === 0) return 'FizzBuzz';
+  if (n % 3 === 0) return 'Fizz';
+  if (n % 5 === 0) return 'Buzz';
+  return String(n);
+}","Writing the implementation first and then retrofitting tests. This leads to tests that confirm existing behavior rather than driving the design, and often results in untested edge cases.",vitest,https://martinfowler.com/bliki/TestDrivenDevelopment.html
+12,Coverage Configuration,Test Infrastructure,"coverage, c8, v8, istanbul, threshold","Configure test coverage thresholds to ensure critical code paths are tested. Use V8 or Istanbul providers in Vitest or Jest.","npm install -D @vitest/coverage-v8
+Configure coverage thresholds in vitest.config.ts or jest.config.ts.","// vitest.config.ts
+import { defineConfig } from 'vitest/config';
+
+export default defineConfig({
+  test: {
+    coverage: {
+      provider: 'v8',
+      reporter: ['text', 'lcov', 'html'],
+      include: ['src/**/*.ts'],
+      exclude: ['src/**/*.test.ts', 'src/**/*.d.ts', 'src/types/**'],
+      thresholds: {
+        lines: 80,
+        functions: 80,
+        branches: 75,
+        statements: 80,
+      },
+    },
+  },
+});
+
+// Run: npx vitest run --coverage","Setting coverage thresholds too high (100%) which makes minor refactors painful, or too low (50%) which provides no real safety net. Start around 80% and adjust.",@vitest/coverage-v8,https://vitest.dev/guide/coverage.html
+13,Testing Async Code,Unit Testing,"async, await, promise, reject, resolve","Properly test async functions by awaiting results, testing resolved values, and verifying rejected promises.","Use async/await in test functions. Vitest and Jest handle promises natively if the test function returns one.","import { describe, it, expect } from 'vitest';
+import { fetchUser, processPayment } from './services';
+
+describe('async operations', () => {
+  it('should resolve with user data', async () => {
+    const user = await fetchUser('1');
+    expect(user).toEqual({ id: '1', name: 'Jane' });
+  });
+
+  it('should reject for invalid id', async () => {
+    await expect(fetchUser('')).rejects.toThrow('Invalid user ID');
+  });
+
+  it('should reject with specific error type', async () => {
+    await expect(processPayment(-1)).rejects.toThrowError(
+      expect.objectContaining({
+        message: 'Invalid amount',
+        code: 'INVALID_AMOUNT',
+      })
+    );
+  });
+});","Forgetting to await expect().rejects.toThrow(). Without await, the test passes even if the promise does not reject, because the assertion itself returns a promise that goes unhandled.",vitest,https://vitest.dev/api/expect.html#rejects
+14,Testing Error Paths,Unit Testing,"error, exception, throw, boundary, negative","Explicitly test error cases and boundary conditions, not just the happy path. Verify correct error types, messages, and status codes.","Write dedicated test cases for each error condition. Use describe blocks to group happy path and error path tests.","import { describe, it, expect } from 'vitest';
+import { createUser } from './user.service';
+
+describe('createUser', () => {
+  describe('validation errors', () => {
+    it('should throw on empty name', async () => {
+      await expect(createUser({ name: '', email: 'a@b.com' }))
+        .rejects.toThrow('Name is required');
+    });
+
+    it('should throw on invalid email', async () => {
+      await expect(createUser({ name: 'Jane', email: 'not-email' }))
+        .rejects.toThrow('Invalid email');
+    });
+
+    it('should throw on duplicate email', async () => {
+      await createUser({ name: 'Jane', email: 'jane@test.com' });
+      await expect(createUser({ name: 'Jane2', email: 'jane@test.com' }))
+        .rejects.toThrow('Email already exists');
+    });
+  });
+
+  describe('success', () => {
+    it('should create valid user', async () => {
+      const user = await createUser({ name: 'Jane', email: 'jane@new.com' });
+      expect(user.id).toBeDefined();
+    });
+  });
+});","Only testing the happy path. If error handling code is not tested, bugs in error paths go undetected until production incidents occur.",vitest,https://vitest.dev/api/expect.html#tothrow
+15,Testing Middleware,Integration Testing,"middleware, express, request, response, next","Test Express/Fastify middleware in isolation by providing mock request, response, and next function objects.","Create minimal mock objects for req, res, and next. Use supertest for full integration middleware tests.","import { describe, it, expect, vi } from 'vitest';
+import type { Request, Response, NextFunction } from 'express';
+import { authMiddleware } from './auth.middleware';
+
+function mockRequest(overrides: Partial<Request> = {}): Partial<Request> {
+  return { headers: {}, ...overrides };
+}
+
+function mockResponse(): Partial<Response> {
+  const res: Partial<Response> = {};
+  res.status = vi.fn().mockReturnValue(res);
+  res.json = vi.fn().mockReturnValue(res);
+  return res;
+}
+
+describe('authMiddleware', () => {
+  it('should call next() with valid token', () => {
+    const req = mockRequest({ headers: { authorization: 'Bearer valid-token' } });
+    const res = mockResponse();
+    const next = vi.fn();
+
+    authMiddleware(req as Request, res as Response, next as NextFunction);
+    expect(next).toHaveBeenCalledOnce();
+    expect(next).toHaveBeenCalledWith();
+  });
+
+  it('should return 401 without token', () => {
+    const req = mockRequest();
+    const res = mockResponse();
+    const next = vi.fn();
+
+    authMiddleware(req as Request, res as Response, next as NextFunction);
+    expect(res.status).toHaveBeenCalledWith(401);
+    expect(next).not.toHaveBeenCalled();
+  });
+});","Testing middleware only through full HTTP requests. While integration tests are valuable, unit testing middleware in isolation is faster and catches logic errors more precisely.",vitest,https://expressjs.com/en/guide/writing-middleware.html
+16,API Contract Testing,Integration Testing,"contract, pact, schema, api, validation","Validate that API consumers and providers agree on the request/response contract using schema validation or tools like Pact.","npm install -D @anatine/zod-openapi
+Define your API schemas with Zod and validate actual responses against them in tests.","import { describe, it, expect } from 'vitest';
+import { z } from 'zod';
+import request from 'supertest';
+import { app } from '../app';
+
+const UserResponseSchema = z.object({
+  id: z.string().uuid(),
+  name: z.string(),
+  email: z.string().email(),
+  createdAt: z.string().datetime(),
+});
+
+const UsersListSchema = z.array(UserResponseSchema);
+
+describe('API Contract: /api/users', () => {
+  it('GET /api/users should match contract', async () => {
+    const response = await request(app)
+      .get('/api/users')
+      .expect(200);
+
+    const result = UsersListSchema.safeParse(response.body);
+    expect(result.success).toBe(true);
+  });
+
+  it('POST /api/users should return created user', async () => {
+    const response = await request(app)
+      .post('/api/users')
+      .send({ name: 'Jane', email: 'jane@test.com' })
+      .expect(201);
+
+    const result = UserResponseSchema.safeParse(response.body);
+    expect(result.success).toBe(true);
+  });
+});","Only checking status codes without validating response body shape. A 200 response with a wrong body structure is still a broken contract.",zod,https://zod.dev/
+17,Component Testing (React Testing Library),Component Testing,"react, testing-library, component, render, dom","React Testing Library encourages testing components the way users interact with them, using queries based on accessible roles and text content.","npm install -D @testing-library/react @testing-library/jest-dom @testing-library/user-event
+Configure your test environment to use jsdom.","import { render, screen } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import { describe, it, expect } from 'vitest';
+import { Counter } from './Counter';
+
+describe('Counter', () => {
+  it('should render initial count', () => {
+    render(<Counter initialCount={5} />);
+    expect(screen.getByText('Count: 5')).toBeInTheDocument();
+  });
+
+  it('should increment on button click', async () => {
+    const user = userEvent.setup();
+    render(<Counter initialCount={0} />);
+
+    await user.click(screen.getByRole('button', { name: /increment/i }));
+    expect(screen.getByText('Count: 1')).toBeInTheDocument();
+  });
+
+  it('should disable button at max', () => {
+    render(<Counter initialCount={10} max={10} />);
+    expect(screen.getByRole('button', { name: /increment/i })).toBeDisabled();
+  });
+});","Testing implementation details like component state or internal method calls. Test what the user sees and interacts with, not internal component structure.",@testing-library/react,https://testing-library.com/docs/react-testing-library/intro/
+18,Environment Variable Mocking,Unit Testing,"env, environment, process, mock, stub","Mock process.env in tests to control configuration without relying on actual environment variables.","Use vi.stubEnv in Vitest or manual assignment with cleanup in Jest.","import { describe, it, expect, vi, afterEach } from 'vitest';
+import { getConfig } from './config';
+
+describe('getConfig', () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it('should use PORT from environment', () => {
+    vi.stubEnv('PORT', '8080');
+    vi.stubEnv('DATABASE_URL', 'postgres://localhost/test');
+    vi.stubEnv('NODE_ENV', 'test');
+
+    const config = getConfig();
+    expect(config.port).toBe(8080);
+    expect(config.databaseUrl).toBe('postgres://localhost/test');
+  });
+
+  it('should use default PORT when not set', () => {
+    vi.stubEnv('DATABASE_URL', 'postgres://localhost/test');
+    vi.stubEnv('NODE_ENV', 'test');
+    delete process.env.PORT;
+
+    const config = getConfig();
+    expect(config.port).toBe(3000);
+  });
+});","Modifying process.env directly without restoring original values in afterEach, causing environment variable leaks between tests and flaky results.",vitest,https://vitest.dev/api/vi.html#vi-stubenv
+19,Factory Pattern for Test Data (fishery),Test Data,"fishery, factory, test data, builder, pattern","Use the fishery library to create type-safe test data factories with support for traits, sequences, and transient parameters.","npm install -D fishery
+Create a factories directory and define a factory for each domain entity.","import { Factory } from 'fishery';
+
+interface User {
+  id: string;
+  name: string;
+  email: string;
+  role: 'admin' | 'editor' | 'viewer';
+  active: boolean;
+}
+
+const userFactory = Factory.define<User>(({ sequence }) => ({
+  id: `user-${sequence}`,
+  name: `User ${sequence}`,
+  email: `user${sequence}@test.com`,
+  role: 'viewer',
+  active: true,
+}));
+
+// Usage in tests
+const user = userFactory.build();
+const admin = userFactory.build({ role: 'admin' });
+const users = userFactory.buildList(5);
+const inactiveUser = userFactory.build({ active: false });
+
+describe('deactivateUser', () => {
+  it('should deactivate an active user', () => {
+    const user = userFactory.build({ active: true });
+    const result = deactivateUser(user);
+    expect(result.active).toBe(false);
+  });
+});","Creating test data with plain object literals in every test. This leads to massive duplication and makes refactoring entity shapes extremely painful.",fishery,https://github.com/thoughtbot/fishery#readme
+20,Parameterized Tests (it.each / test.each),Unit Testing,"each, parameterized, table, data-driven, matrix","Use it.each or test.each to run the same test with different inputs, reducing duplication for data-driven tests.",Use it.each with a table of inputs and expected outputs. Add descriptive test names using template literals.,"import { describe, it, expect } from 'vitest';
+import { classify } from './classifier';
+
+describe('classify', () => {
+  it.each([
+    { input: 0, expected: 'zero' },
+    { input: 1, expected: 'positive' },
+    { input: -1, expected: 'negative' },
+    { input: 100, expected: 'positive' },
+    { input: -100, expected: 'negative' },
+  ])('classify($input) should return $expected', ({ input, expected }) => {
+    expect(classify(input)).toBe(expected);
+  });
+
+  it.each([
+    [3, 'Fizz'],
+    [5, 'Buzz'],
+    [15, 'FizzBuzz'],
+    [7, '7'],
+  ])('fizzBuzz(%i) should return %s', (input, expected) => {
+    expect(fizzBuzz(input)).toBe(expected);
+  });
+});","Writing separate test functions for each input when the test logic is identical. This creates unnecessary code duplication and makes it harder to add new test cases.",vitest,https://vitest.dev/api/#test-each
+21,Testing Event Emitters,Unit Testing,"event, emitter, emit, listener, async","Test Node.js EventEmitter-based code by listening for events and asserting they fire with correct data.","Use once() with promises for async event testing. Use vi.fn() to create spy listeners.","import { describe, it, expect, vi } from 'vitest';
+import { EventEmitter, once } from 'node:events';
+import { JobProcessor } from './job-processor';
+
+describe('JobProcessor', () => {
+  it('should emit ""completed"" when job finishes', async () => {
+    const processor = new JobProcessor();
+    const completedPromise = once(processor, 'completed');
+
+    processor.process({ id: '1', type: 'email' });
+
+    const [result] = await completedPromise;
+    expect(result).toEqual({ id: '1', status: 'done' });
+  });
+
+  it('should emit ""error"" on invalid job', async () => {
+    const processor = new JobProcessor();
+    const errorHandler = vi.fn();
+    processor.on('error', errorHandler);
+
+    processor.process({ id: '', type: '' });
+
+    expect(errorHandler).toHaveBeenCalledWith(
+      expect.objectContaining({ message: 'Invalid job' })
+    );
+  });
+
+  it('should emit ""progress"" events', async () => {
+    const processor = new JobProcessor();
+    const events: number[] = [];
+    processor.on('progress', (pct: number) => events.push(pct));
+
+    await processor.process({ id: '1', type: 'report' });
+
+    expect(events).toEqual([25, 50, 75, 100]);
+  });
+});","Not handling the case where an event never fires. Use Promise.race with a timeout or AbortSignal to avoid tests hanging indefinitely on missing events.",node:events,https://nodejs.org/api/events.html
+22,Testing WebSocket Connections,Integration Testing,"websocket, ws, socket, realtime, connection","Test WebSocket servers by creating real client connections in tests and asserting on messages and connection lifecycle.","npm install -D ws @types/ws
+Start the WebSocket server in beforeAll and close it in afterAll. Create client connections per test.","import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { WebSocketServer, WebSocket } from 'ws';
+import { createWSServer } from './ws-server';
+
+let wss: WebSocketServer;
+let port: number;
+
+beforeAll(async () => {
+  wss = createWSServer();
+  await new Promise<void>((resolve) => {
+    wss.on('listening', () => {
+      port = (wss.address() as { port: number }).port;
+      resolve();
+    });
+  });
+});
+
+afterAll(() => {
+  wss.close();
+});
+
+function connectClient(): Promise<WebSocket> {
+  return new Promise((resolve, reject) => {
+    const ws = new WebSocket(`ws://localhost:${port}`);
+    ws.on('open', () => resolve(ws));
+    ws.on('error', reject);
+  });
+}
+
+describe('WebSocket Server', () => {
+  it('should echo messages', async () => {
+    const client = await connectClient();
+    const messagePromise = new Promise<string>((resolve) => {
+      client.on('message', (data) => resolve(data.toString()));
+    });
+
+    client.send('hello');
+    const response = await messagePromise;
+    expect(response).toBe('hello');
+    client.close();
+  });
+});","Not closing WebSocket connections in tests, leading to handle leaks and tests that hang or fail intermittently on CI.",ws,https://github.com/websockets/ws#readme
+23,Performance Testing (autocannon),Performance Testing,"performance, load, autocannon, benchmark, throughput","Use autocannon to load-test HTTP endpoints and measure throughput, latency, and error rates.","npm install -D autocannon @types/autocannon
+Start your server before running benchmarks. Use autocannon programmatically in test files.","import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import autocannon from 'autocannon';
+import { createServer } from 'node:http';
+import { app } from '../app';
+
+let server: ReturnType<typeof createServer>;
+let baseUrl: string;
+
+beforeAll(async () => {
+  server = createServer(app);
+  await new Promise<void>((resolve) => {
+    server.listen(0, () => {
+      const addr = server.address() as { port: number };
+      baseUrl = `http://localhost:${addr.port}`;
+      resolve();
+    });
+  });
+});
+
+afterAll(() => {
+  server.close();
+});
+
+describe('Performance', () => {
+  it('GET /api/health should handle 1000 req/s', async () => {
+    const result = await autocannon({
+      url: `${baseUrl}/api/health`,
+      connections: 10,
+      duration: 5,
+      pipelining: 1,
+    });
+
+    expect(result.errors).toBe(0);
+    expect(result.non2xx).toBe(0);
+    expect(result.requests.average).toBeGreaterThan(1000);
+    expect(result.latency.p99).toBeLessThan(100);
+  }, 30_000);
+});","Running performance tests in CI alongside unit tests. Performance tests are slow and results vary by machine. Run them separately with dedicated infrastructure.",autocannon,https://github.com/mcollina/autocannon#readme
+24,Testing Prisma Queries,Integration Testing,"prisma, database, orm, query, integration","Test Prisma queries against a real database to ensure your data access layer works correctly with actual SQL.","Use a test database with Prisma migrations applied. Clean tables between tests using $executeRawUnsafe or transactions.","import { describe, it, expect, beforeEach, afterAll } from 'vitest';
+import { PrismaClient } from '@prisma/client';
+
+const prisma = new PrismaClient({
+  datasources: { db: { url: process.env.TEST_DATABASE_URL } },
+});
+
+beforeEach(async () => {
+  await prisma.$transaction([
+    prisma.comment.deleteMany(),
+    prisma.post.deleteMany(),
+    prisma.user.deleteMany(),
+  ]);
+});
+
+afterAll(async () => {
+  await prisma.$disconnect();
+});
+
+describe('User queries', () => {
+  it('should create user with posts', async () => {
+    const user = await prisma.user.create({
+      data: {
+        name: 'Jane',
+        email: 'jane@test.com',
+        posts: {
+          create: [
+            { title: 'First Post', content: 'Hello world' },
+            { title: 'Second Post', content: 'More content' },
+          ],
+        },
+      },
+      include: { posts: true },
+    });
+
+    expect(user.posts).toHaveLength(2);
+    expect(user.posts[0].title).toBe('First Post');
+  });
+
+  it('should find users with post count', async () => {
+    await prisma.user.create({
+      data: { name: 'Jane', email: 'jane@test.com', posts: { create: { title: 'Post', content: 'Content' } } },
+    });
+
+    const users = await prisma.user.findMany({
+      include: { _count: { select: { posts: true } } },
+    });
+
+    expect(users[0]._count.posts).toBe(1);
+  });
+});","Mocking PrismaClient entirely in integration tests. Mocking the ORM defeats the purpose of testing data access logic. Use a real test database instead.",@prisma/client,https://www.prisma.io/docs/guides/testing/integration-testing
+25,Testing Zod Schemas,Unit Testing,"zod, schema, validation, parse, safeParse","Test Zod schemas to verify they accept valid data and reject invalid data with correct error messages.","No extra setup needed. Import your Zod schemas and use safeParse to test both valid and invalid inputs.","import { describe, it, expect } from 'vitest';
+import { z } from 'zod';
+
+const CreateUserSchema = z.object({
+  name: z.string().min(2).max(100),
+  email: z.string().email(),
+  age: z.number().int().min(13).max(150).optional(),
+  role: z.enum(['admin', 'editor', 'viewer']).default('viewer'),
+});
+
+describe('CreateUserSchema', () => {
+  it('should accept valid input', () => {
+    const result = CreateUserSchema.safeParse({
+      name: 'Jane Doe',
+      email: 'jane@example.com',
+      age: 30,
+    });
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.role).toBe('viewer');
+    }
+  });
+
+  it('should reject invalid email', () => {
+    const result = CreateUserSchema.safeParse({
+      name: 'Jane',
+      email: 'not-an-email',
+    });
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      const emailError = result.error.issues.find(i => i.path[0] === 'email');
+      expect(emailError).toBeDefined();
+    }
+  });
+
+  it('should reject name too short', () => {
+    const result = CreateUserSchema.safeParse({ name: 'J', email: 'j@test.com' });
+    expect(result.success).toBe(false);
+  });
+
+  it('should reject underage', () => {
+    const result = CreateUserSchema.safeParse({ name: 'Jane', email: 'j@test.com', age: 10 });
+    expect(result.success).toBe(false);
+  });
+});","Using schema.parse() in tests instead of schema.safeParse(). parse() throws on invalid input, making it harder to assert on specific validation error details.",zod,https://zod.dev/

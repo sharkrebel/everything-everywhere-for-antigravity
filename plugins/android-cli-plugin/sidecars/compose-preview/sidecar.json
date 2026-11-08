@@ -1,0 +1,25 @@
+{
+  "command": "node",
+  "args": [
+    "../launch.mjs",
+    "compose-preview"
+  ],
+  "env": {
+    "ANDROID_CLI_SIDECAR": "1",
+    "ANDROID_CLI_PREVIEW": "1"
+  },
+  "restart_policy": "always",
+  "display_name": "Android Compose Preview",
+  "description": "Renders Jetpack Compose previews with `android preview` and shows them in a pane.",
+  "has_web_ui": true,
+  "ui_config": {
+    "display_name": "Android Compose Preview",
+    "views": [
+      {
+        "title": "Android Compose Preview",
+        "path": "/",
+        "entrypoint": "SIDECAR_UI_ENTRYPOINT_AUX_PANE"
+      }
+    ]
+  }
+}

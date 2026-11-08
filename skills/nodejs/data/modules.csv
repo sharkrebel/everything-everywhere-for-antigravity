@@ -1,0 +1,143 @@
+No,Topic,Keywords,Description,Do,Dont,Example,Severity,Docs URL
+1,package.json Essentials,"package.json, name, version, main, scripts, entry point","The package.json file is the manifest for every Node.js project; it declares the package name, version, entry points, scripts, and dependencies.","Always include ""name"", ""version"", ""main"" (or ""exports""), ""scripts"", and ""license"" fields. Keep scripts concise and use conventional names like ""build"", ""test"", ""start"", and ""lint"".","Do not omit the ""name"" or ""version"" fields for published packages. Do not put build commands directly in ""start""; keep ""start"" for running the production server.","{
+  ""name"": ""my-api"",
+  ""version"": ""1.0.0"",
+  ""main"": ""dist/index.js"",
+  ""scripts"": {
+    ""build"": ""tsup src/index.ts"",
+    ""start"": ""node dist/index.js"",
+    ""test"": ""vitest run""
+  }
+}",error,https://docs.npmjs.com/cli/configuring-npm/package-json
+2,Lockfile Management,"lockfile, package-lock.json, pnpm-lock.yaml, deterministic, ci","Lockfiles pin every dependency to an exact resolved version, ensuring deterministic installs across machines and CI environments.","Always commit your lockfile to version control. Use ""npm ci"" or ""pnpm install --frozen-lockfile"" in CI to guarantee reproducible builds.","Do not delete the lockfile to ""fix"" install issues; run ""npm install"" or ""pnpm install"" to regenerate it properly. Do not mix package managers in the same project.","{
+  ""scripts"": {
+    ""ci"": ""npm ci""
+  }
+}",error,https://docs.npmjs.com/cli/commands/npm-ci
+3,Semantic Versioning,"semver, caret, tilde, exact version, version range, ^, ~","Semantic versioning (semver) uses MAJOR.MINOR.PATCH to communicate the impact of changes; npm range operators like ^ and ~ control which updates are accepted.","Use ^ (caret) for libraries to accept backward-compatible updates. Pin exact versions for critical production dependencies where even minor updates could cause breakage.","Do not use * or ""latest"" as a version range in production dependencies. Do not ignore major version bumps; they signal breaking changes.","{
+  ""dependencies"": {
+    ""express"": ""^4.18.2"",
+    ""stripe"": ""14.11.0""
+  }
+}",warning,https://docs.npmjs.com/about-semantic-versioning
+4,Peer Dependencies,"peerDependencies, plugin, host package, version conflict","Peer dependencies declare that a package is compatible with a specific version of a host package without bundling it, commonly used by plugins and frameworks.","Use peerDependencies when your package is a plugin or addon that relies on a host package the consumer already installs. Specify a wide but tested version range.","Do not put peer dependencies in regular dependencies; it causes duplicate installations. Do not specify an overly narrow peer range that forces consumers to use one exact version.","{
+  ""peerDependencies"": {
+    ""react"": ""^17.0.0 || ^18.0.0""
+  },
+  ""peerDependenciesMeta"": {
+    ""react"": { ""optional"": false }
+  }
+}",warning,https://docs.npmjs.com/cli/configuring-npm/package-json#peerdependencies
+5,Monorepo with Turborepo,"turborepo, turbo, monorepo, workspace, pipeline, cache","Turborepo orchestrates tasks across monorepo workspaces with intelligent caching, parallel execution, and topological task ordering.","Define a ""pipeline"" in turbo.json specifying task dependencies and outputs. Use remote caching in CI to share build artifacts across machines.","Do not skip defining ""outputs"" in turbo.json; without them, Turborepo cannot cache correctly. Do not run tasks outside of turbo if they depend on other workspace builds.","{
+  ""$schema"": ""https://turbo.build/schema.json"",
+  ""pipeline"": {
+    ""build"": {
+      ""dependsOn"": [""^build""],
+      ""outputs"": [""dist/**""]
+    },
+    ""test"": {
+      ""dependsOn"": [""build""]
+    }
+  }
+}",error,https://turbo.build/repo/docs
+6,Monorepo with Nx,"nx, monorepo, project graph, affected, cache, plugins","Nx is a monorepo build system that uses a project graph to determine task dependencies, supports computation caching, and runs only affected tasks on changes.","Use ""nx affected"" in CI to run only the tasks impacted by the current changeset. Configure cacheableOperations and leverage Nx plugins for framework-specific optimizations.","Do not run all tasks on every commit; use ""nx affected"" to save CI time. Do not ignore the project graph; misconfigured dependencies lead to stale caches.","{
+  ""$schema"": ""nx/schemas/nx-schema.json"",
+  ""tasksRunnerOptions"": {
+    ""default"": {
+      ""runner"": ""nx/tasks-runners/default"",
+      ""options"": { ""cacheableOperations"": [""build"", ""test"", ""lint""] }
+    }
+  }
+}",warning,https://nx.dev/getting-started/intro
+7,npm Workspaces,"npm workspaces, monorepo, workspace protocol, hoisting","npm workspaces provide native monorepo support in npm 7+, allowing you to manage multiple packages from a single root package.json.","Declare workspaces in the root package.json. Use ""npm run -w <pkg>"" to run scripts in a specific workspace and ""npm install -w <pkg> <dep>"" to add dependencies.","Do not install dependencies from the individual package directories; always install from the root. Do not forget to set ""private"": true in the root package.json.","{
+  ""private"": true,
+  ""workspaces"": [""packages/*"", ""apps/*""]
+}",warning,https://docs.npmjs.com/cli/using-npm/workspaces
+8,pnpm Workspaces,"pnpm workspaces, pnpm-workspace.yaml, workspace protocol, strict","pnpm workspaces use a pnpm-workspace.yaml file and the ""workspace:"" protocol to link local packages in a monorepo with strict dependency isolation.","Create a pnpm-workspace.yaml at the root listing workspace directories. Use ""workspace:*"" protocol to reference sibling packages so they resolve locally.","Do not use file: or link: protocols for local packages; use workspace:* instead. Do not forget to create pnpm-workspace.yaml or pnpm will not recognize workspaces.","# pnpm-workspace.yaml
+packages:
+  - ""packages/*""
+  - ""apps/*""
+
+# In a package's package.json:
+# ""dependencies"": { ""@myorg/shared"": ""workspace:*"" }",warning,https://pnpm.io/workspaces
+9,ESM/CJS Interop,"esm, cjs, commonjs, es modules, interop, require, import, dual package","Node.js supports both ECMAScript Modules (ESM) and CommonJS (CJS); interoperability requires careful configuration of package.json ""type"" field and file extensions.","Set ""type"": ""module"" for ESM projects. Use .mjs/.cjs extensions when mixing module systems. For libraries, ship both ESM and CJS builds via the ""exports"" field.","Do not use require() in ESM files without createRequire. Do not assume named imports work when importing CJS from ESM; use default import and destructure.","{
+  ""type"": ""module"",
+  ""exports"": {
+    ""import"": ""./dist/index.mjs"",
+    ""require"": ""./dist/index.cjs""
+  }
+}",error,https://nodejs.org/api/esm.html
+10,Tree Shaking,"tree shaking, dead code elimination, side effects, esm, bundler","Tree shaking is a bundler optimization that eliminates unused exports from the final bundle, reducing output size significantly.","Mark packages as side-effect-free with ""sideEffects"": false in package.json. Write pure ESM exports so bundlers can statically analyze imports.","Do not use CommonJS require() in library code intended for tree shaking; bundlers cannot statically analyze CJS. Do not put side effects at the module top level without declaring them.","{
+  ""name"": ""my-utils"",
+  ""sideEffects"": false,
+  ""module"": ""dist/index.mjs""
+}",warning,https://webpack.js.org/guides/tree-shaking/
+11,exports Field,"exports, conditional exports, subpath exports, package.json, entry points","The ""exports"" field in package.json defines conditional and subpath entry points, controlling which files consumers can import and under which conditions.","Use ""exports"" to expose specific entry points for ESM, CJS, and TypeScript types. Define subpath exports for feature-specific imports like ""my-pkg/utils"".","Do not rely solely on ""main"" for modern packages; ""exports"" takes precedence in Node.js 12.11+. Do not expose internal files without an explicit subpath export.","{
+  ""exports"": {
+    ""."": {
+      ""types"": ""./dist/index.d.ts"",
+      ""import"": ""./dist/index.mjs"",
+      ""require"": ""./dist/index.cjs""
+    },
+    ""./utils"": {
+      ""types"": ""./dist/utils.d.ts"",
+      ""import"": ""./dist/utils.mjs""
+    }
+  }
+}",error,https://nodejs.org/api/packages.html#exports
+12,types Field,"types, typings, typescript, declarations, d.ts, type definitions","The ""types"" (or ""typings"") field in package.json points to the main TypeScript declaration file so consumers get type information without the source code.","Set ""types"" to the path of your generated .d.ts file. When using the ""exports"" field, include a ""types"" condition in each export entry for proper resolution.","Do not forget to generate .d.ts files during the build step. Do not point ""types"" to a .ts source file; it must reference the compiled .d.ts declaration file.","{
+  ""types"": ""./dist/index.d.ts"",
+  ""exports"": {
+    ""."": {
+      ""types"": ""./dist/index.d.ts"",
+      ""import"": ""./dist/index.mjs""
+    }
+  }
+}",error,https://www.typescriptlang.org/docs/handbook/declaration-files/publishing.html
+13,devDependencies vs dependencies,"devDependencies, dependencies, production, development, classification","dependencies are packages required at runtime; devDependencies are packages needed only during development, testing, or building.","Put runtime libraries (express, prisma) in dependencies. Put build tools, linters, test frameworks, and type definitions in devDependencies.","Do not put build-only tools like TypeScript, ESLint, or Vitest in dependencies. Do not put runtime-required packages in devDependencies or production installs will fail.","{
+  ""dependencies"": {
+    ""express"": ""^4.18.2"",
+    ""zod"": ""^3.22.0""
+  },
+  ""devDependencies"": {
+    ""typescript"": ""^5.3.0"",
+    ""vitest"": ""^1.0.0"",
+    ""@types/express"": ""^4.17.21""
+  }
+}",error,https://docs.npmjs.com/specifying-dependencies-and-devdependencies-in-a-package-json-file
+14,Publishing to npm,"npm publish, prepublish, package files, registry, tarball","Publishing to npm makes a package available to the community; a proper prepublish checklist ensures quality, correct contents, and proper metadata.","Run ""npm pack --dry-run"" to verify included files before publishing. Set the ""files"" field to whitelist only dist/ and necessary assets. Always build and test before publish.","Do not publish without reviewing the tarball contents. Do not include src/, tests, or config files in the published package. Do not forget to bump the version before publishing.","{
+  ""files"": [""dist"", ""README.md"", ""LICENSE""],
+  ""scripts"": {
+    ""prepublishOnly"": ""npm run build && npm test""
+  }
+}",error,https://docs.npmjs.com/cli/commands/npm-publish
+15,Private Packages,"private, workspace package, no publish, internal","Setting ""private"": true in package.json prevents a package from being accidentally published to the npm registry; commonly used for app packages and monorepo roots.","Set ""private"": true for application packages, monorepo roots, and any workspace package that should never be published.","Do not leave off ""private"": true on internal packages; an accidental ""npm publish"" could expose proprietary code to the public registry.","{
+  ""name"": ""@myorg/internal-api"",
+  ""version"": ""1.0.0"",
+  ""private"": true
+}",error,https://docs.npmjs.com/cli/configuring-npm/package-json#private
+16,npm Scripts Best Practices,"npm scripts, lifecycle scripts, pre, post, run","npm scripts defined in package.json replace the need for task runners; lifecycle hooks like pre/post automatically run before/after a named script.","Use conventional script names (build, test, start, lint, format). Leverage pre/post hooks for setup and cleanup. Keep scripts focused and composable.","Do not chain too many commands with && in a single script; break them into named scripts. Do not use OS-specific commands (rm -rf) without cross-env or rimraf for cross-platform support.","{
+  ""scripts"": {
+    ""prebuild"": ""rimraf dist"",
+    ""build"": ""tsup src/index.ts"",
+    ""postbuild"": ""echo Build complete"",
+    ""lint"": ""eslint ."",
+    ""format"": ""prettier --write ."",
+    ""check"": ""npm run lint && npm run build && npm test""
+  }
+}",warning,https://docs.npmjs.com/cli/using-npm/scripts
+17,engines Field,"engines, node version, npm version, constraints, semver range","The ""engines"" field in package.json specifies which versions of Node.js and npm the package is compatible with, helping prevent runtime errors.","Set ""engines"" to the minimum Node.js version your code requires. Use ""engine-strict"" config or a .npmrc with engine-strict=true to enforce it during install.","Do not set an overly restrictive engines range that blocks consumers unnecessarily. Do not forget to actually test on the minimum version you declare.","{
+  ""engines"": {
+    ""node"": "">=18.0.0"",
+    ""npm"": "">=9.0.0""
+  }
+}",warning,https://docs.npmjs.com/cli/configuring-npm/package-json#engines
+18,overrides/resolutions,"overrides, resolutions, dependency forcing, version pinning, security patch","overrides (npm) and resolutions (yarn/pnpm) let you force specific versions of transitive dependencies, often used to patch security vulnerabilities or resolve conflicts.","Use overrides to patch a known vulnerability in a transitive dependency until the direct dependency releases a fix. Document every override with a comment or linked issue.","Do not leave stale overrides in package.json after the upstream fix is released. Do not use overrides to force incompatible major versions; it can cause subtle runtime errors.","{
+  ""overrides"": {
+    ""nth-check"": ""^2.1.1"",
+    ""semver"": ""^7.5.4""
+  }
+}
+
+# pnpm equivalent in package.json:
+# ""pnpm"": { ""overrides"": { ""nth-check"": ""^2.1.1"" } }",warning,https://docs.npmjs.com/cli/configuring-npm/package-json#overrides

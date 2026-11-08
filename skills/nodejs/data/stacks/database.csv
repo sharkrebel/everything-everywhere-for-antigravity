@@ -1,0 +1,728 @@
+No,Category,Guideline,Description,Do,Dont,Code Good,Code Bad,Severity,Docs URL
+1,PostgreSQL,"Connection pooling with pg Pool","Use a connection pool to manage PostgreSQL connections efficiently. A Pool reuses idle connections, limits total connections, and handles automatic reconnection. Always configure max, idleTimeoutMillis, and connectionTimeoutMillis. Listen for pool-level error events to prevent unhandled crashes.","Use Pool with explicit max connections and timeout settings; handle pool error events; call pool.end() on shutdown","Dont create a new Client per request; dont leave pool.max at default without benchmarking; dont ignore pool error events","import { Pool, QueryResultRow } from 'pg';
+
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  max: 20,
+  idleTimeoutMillis: 30000,
+  connectionTimeoutMillis: 5000,
+});
+
+pool.on('error', (err) => {
+  console.error('Idle client error:', err);
+});
+
+export async function query<T extends QueryResultRow>(
+  text: string,
+  params?: unknown[]
+) {
+  return pool.query<T>(text, params);
+}","import { Client } from 'pg';
+
+// Bad: new client per request, no pooling
+export async function query(text: string) {
+  const client = new Client(process.env.DATABASE_URL);
+  await client.connect();
+  const res = await client.query(text);
+  await client.end();
+  return res;
+}",critical,https://node-postgres.com/features/pooling
+2,PostgreSQL,"Parameterized queries to prevent SQL injection","Always use parameterized queries ($1, $2, ...) to pass user input. The pg library separates query text from parameters at the protocol level, making SQL injection impossible. Never concatenate or template user input into query strings.","Use $1 placeholders and pass values as the second argument array; validate input types before querying","Dont concatenate user input into SQL strings; dont use template literals to embed variables in queries","import { pool } from './db';
+
+interface User { id: number; email: string; name: string }
+
+export async function findUser(email: string): Promise<User | null> {
+  const { rows } = await pool.query<User>(
+    'SELECT id, email, name FROM users WHERE email = $1',
+    [email]
+  );
+  return rows[0] ?? null;
+}","import { pool } from './db';
+
+// Bad: SQL injection vulnerability via string interpolation
+export async function findUser(email: string) {
+  const { rows } = await pool.query(
+    `SELECT id, email, name FROM users WHERE email = '${email}'`
+  );
+  return rows[0] ?? null;
+}",critical,https://node-postgres.com/features/queries#parameterized-query
+3,PostgreSQL,"Transaction management with BEGIN/COMMIT/ROLLBACK","Use explicit transactions when multiple statements must succeed or fail together. Acquire a client from the pool, issue BEGIN, run statements, then COMMIT. Always ROLLBACK in a catch block and release the client in a finally block to prevent connection leaks.","Acquire a dedicated client for transactions; always ROLLBACK on error; always release the client in finally","Dont run transactions on the pool directly; dont forget to release the client; dont skip ROLLBACK on error","import { pool } from './db';
+
+export async function transferFunds(fromId: number, toId: number, amount: number) {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query('UPDATE accounts SET balance = balance - $1 WHERE id = $2', [amount, fromId]);
+    await client.query('UPDATE accounts SET balance = balance + $1 WHERE id = $2', [amount, toId]);
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+}","import { pool } from './db';
+
+// Bad: no transaction, partial failure possible, no rollback
+export async function transferFunds(fromId: number, toId: number, amount: number) {
+  await pool.query('UPDATE accounts SET balance = balance - $1 WHERE id = $2', [amount, fromId]);
+  await pool.query('UPDATE accounts SET balance = balance + $1 WHERE id = $2', [amount, toId]);
+}",critical,https://node-postgres.com/features/transactions
+4,PostgreSQL,"Migration management with node-pg-migrate","Use a migration tool like node-pg-migrate or knex to version-control schema changes. Each migration should have an up and down function. Run migrations in CI/CD before deployment. Never modify production schemas manually.","Use timestamped migration files with up/down functions; run migrations in CI/CD pipelines; test rollbacks","Dont alter production tables with raw SQL manually; dont skip down migrations; dont share a migration across unrelated changes","/* migrations/1700000000000_create-users.ts */
+import { MigrationBuilder } from 'node-pg-migrate';
+
+export async function up(pgm: MigrationBuilder): Promise<void> {
+  pgm.createTable('users', {
+    id: { type: 'serial', primaryKey: true },
+    email: { type: 'varchar(255)', notNull: true, unique: true },
+    name: { type: 'varchar(255)', notNull: true },
+    created_at: { type: 'timestamptz', notNull: true, default: pgm.func('now()') },
+  });
+  pgm.createIndex('users', 'email');
+}
+
+export async function down(pgm: MigrationBuilder): Promise<void> {
+  pgm.dropTable('users');
+}","// Bad: raw ALTER TABLE in application code, no versioning
+import { pool } from './db';
+
+async function migrate() {
+  await pool.query('ALTER TABLE users ADD COLUMN age INT');
+  await pool.query('CREATE INDEX idx_age ON users(age)');
+  // No rollback plan, no version tracking
+}",high,https://salsita.github.io/node-pg-migrate/
+5,PostgreSQL,"Index optimization for queries","Create indexes on columns used in WHERE, JOIN, and ORDER BY clauses. Use EXPLAIN ANALYZE to verify index usage. Prefer partial indexes for filtered queries and composite indexes for multi-column conditions. Drop unused indexes to reduce write overhead.","Use EXPLAIN ANALYZE to verify index usage; create composite indexes for multi-column WHERE clauses; use partial indexes","Dont create indexes on every column blindly; dont forget to analyze query plans; dont leave unused indexes","import { pool } from './db';
+
+// Create targeted indexes for common query patterns
+export async function createOrderIndexes(): Promise<void> {
+  // Composite index for status + date range queries
+  await pool.query(`
+    CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_orders_status_created
+    ON orders (status, created_at DESC)
+  `);
+  // Partial index for active orders only
+  await pool.query(`
+    CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_orders_active
+    ON orders (user_id) WHERE status = 'active'
+  `);
+}","import { pool } from './db';
+
+// Bad: index on every column, no analysis
+export async function createOrderIndexes(): Promise<void> {
+  await pool.query('CREATE INDEX idx_a ON orders (id)');
+  await pool.query('CREATE INDEX idx_b ON orders (user_id)');
+  await pool.query('CREATE INDEX idx_c ON orders (status)');
+  await pool.query('CREATE INDEX idx_d ON orders (created_at)');
+  await pool.query('CREATE INDEX idx_e ON orders (updated_at)');
+}",high,https://www.postgresql.org/docs/current/indexes.html
+6,PostgreSQL,"JSONB columns for flexible data","Use JSONB columns for semi-structured or variable-schema data. JSONB supports indexing with GIN indexes, enabling fast containment and key-existence queries. Validate JSONB input with Zod or JSON Schema before insertion. Avoid using JSONB for highly relational data.","Use JSONB with GIN indexes for flexible data; validate JSON structure before insertion; use containment operators","Dont store highly relational data in JSONB; dont skip validation on JSONB input; dont query JSONB without indexes on large tables","import { pool } from './db';
+import { z } from 'zod';
+
+const MetadataSchema = z.object({
+  tags: z.array(z.string()),
+  priority: z.enum(['low', 'medium', 'high']),
+});
+
+export async function createProduct(name: string, metadata: unknown) {
+  const parsed = MetadataSchema.parse(metadata);
+  const { rows } = await pool.query(
+    'INSERT INTO products (name, metadata) VALUES ($1, $2) RETURNING *',
+    [name, JSON.stringify(parsed)]
+  );
+  return rows[0];
+}","import { pool } from './db';
+
+// Bad: no validation, no typing on JSONB input
+export async function createProduct(name: string, metadata: any) {
+  const { rows } = await pool.query(
+    'INSERT INTO products (name, metadata) VALUES ($1, $2) RETURNING *',
+    [name, JSON.stringify(metadata)]
+  );
+  return rows[0];
+}",medium,https://www.postgresql.org/docs/current/datatype-json.html
+7,PostgreSQL,"Connection string and SSL configuration","Use environment variables for connection strings. Enable SSL in production with rejectUnauthorized set appropriately. Parse DATABASE_URL with pg connection string support. Keep credentials out of source code and use secret managers in production.","Use environment variables for connection strings; enable SSL in production; use certificate-based auth when possible","Dont hardcode credentials in source code; dont disable SSL in production; dont commit .env files with database passwords","import { Pool } from 'pg';
+import fs from 'fs';
+
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: process.env.NODE_ENV === 'production' ? {
+    rejectUnauthorized: true,
+    ca: fs.readFileSync('/etc/ssl/certs/rds-ca.pem').toString(),
+  } : false,
+  max: 20,
+});
+
+export default pool;","import { Pool } from 'pg';
+
+// Bad: hardcoded credentials, SSL disabled
+const pool = new Pool({
+  host: 'prod-db.example.com',
+  user: 'admin',
+  password: 'supersecret123',
+  database: 'myapp',
+  ssl: false,
+});
+
+export default pool;",critical,https://node-postgres.com/features/ssl
+8,PostgreSQL,"Prepared statements for performance","Use named prepared statements for frequently executed queries. The pg library caches query plans for prepared statements, reducing parse overhead. Name statements consistently and keep them in a dedicated module for reuse.","Use named prepared statements for hot-path queries; centralize statement definitions; benchmark with EXPLAIN","Dont use prepared statements for one-off queries; dont duplicate statement names; dont skip parameterization in prepared statements","import { pool } from './db';
+
+// Prepared statement with a name for plan caching
+export async function getOrdersByUser(userId: number) {
+  const { rows } = await pool.query({
+    name: 'get-orders-by-user',
+    text: 'SELECT * FROM orders WHERE user_id = $1 ORDER BY created_at DESC LIMIT 50',
+    values: [userId],
+  });
+  return rows;
+}
+
+export async function getProductById(productId: number) {
+  const { rows } = await pool.query({
+    name: 'get-product-by-id',
+    text: 'SELECT * FROM products WHERE id = $1',
+    values: [productId],
+  });
+  return rows[0];
+}","import { pool } from './db';
+
+// Bad: dynamic query string rebuilt each call, no plan caching
+export async function getOrdersByUser(userId: number) {
+  const query = `SELECT * FROM orders WHERE user_id = ${userId} ORDER BY created_at DESC LIMIT 50`;
+  const { rows } = await pool.query(query);
+  return rows;
+}",high,https://node-postgres.com/features/queries#prepared-statements
+9,Redis,"ioredis connection and configuration","Use ioredis for Redis connections with automatic reconnection, Cluster support, and Sentinel support. Configure maxRetriesPerRequest, retryStrategy, and lazyConnect. Handle connection events for monitoring. Use a singleton instance across the application.","Use ioredis with explicit retry and timeout configs; handle connect/error/close events; use lazyConnect in tests","Dont create multiple Redis instances unnecessarily; dont ignore connection error events; dont use the deprecated redis package for new projects","import Redis from 'ioredis';
+
+const redis = new Redis({
+  host: process.env.REDIS_HOST ?? 'localhost',
+  port: Number(process.env.REDIS_PORT ?? 6379),
+  password: process.env.REDIS_PASSWORD,
+  maxRetriesPerRequest: 3,
+  retryStrategy(times: number) {
+    return Math.min(times * 200, 5000);
+  },
+});
+
+redis.on('connect', () => console.log('Redis connected'));
+redis.on('error', (err) => console.error('Redis error:', err));
+
+export default redis;","import { createClient } from 'redis';
+
+// Bad: deprecated package, no retry config, no error handling
+const client = createClient();
+client.connect();
+
+export default client;",critical,https://redis.io/docs/latest/develop/clients/nodejs/
+10,Redis,"Caching patterns with cache-aside strategy","Implement cache-aside (lazy-loading) pattern: check cache first, on miss fetch from database, then populate cache with a TTL. Use JSON serialization for complex objects. Invalidate cache on writes. Set appropriate TTL values to balance freshness and performance.","Use cache-aside with TTL; invalidate on writes; serialize/deserialize consistently; use key prefixes","Dont cache without TTL; dont forget to invalidate on mutation; dont cache sensitive data without encryption","import redis from './redis';
+import { pool } from './db';
+
+export async function getUserById(id: number) {
+  const cacheKey = `user:${id}`;
+  const cached = await redis.get(cacheKey);
+  if (cached) return JSON.parse(cached);
+
+  const { rows } = await pool.query('SELECT * FROM users WHERE id = $1', [id]);
+  const user = rows[0];
+  if (user) {
+    await redis.set(cacheKey, JSON.stringify(user), 'EX', 3600);
+  }
+  return user ?? null;
+}
+
+export async function updateUser(id: number, data: { name: string }) {
+  await pool.query('UPDATE users SET name = $1 WHERE id = $2', [data.name, id]);
+  await redis.del(`user:${id}`);
+}","import redis from './redis';
+import { pool } from './db';
+
+// Bad: no TTL, no invalidation, stale data forever
+export async function getUserById(id: number) {
+  const cached = await redis.get(`user:${id}`);
+  if (cached) return JSON.parse(cached);
+
+  const { rows } = await pool.query('SELECT * FROM users WHERE id = $1', [id]);
+  await redis.set(`user:${id}`, JSON.stringify(rows[0]));
+  return rows[0];
+}",high,https://redis.io/docs/latest/develop/use/client-side-caching/
+11,Redis,"Pub/Sub for real-time messaging","Use ioredis Pub/Sub for broadcasting events across Node.js processes. Create a dedicated subscriber connection because a subscribed client cannot issue other commands. Parse message payloads safely and handle subscription errors.","Use a dedicated Redis connection for subscriptions; validate message payloads; handle unsubscribe on shutdown","Dont reuse the subscriber connection for regular commands; dont send unparseable payloads; dont forget to unsubscribe on process exit","import Redis from 'ioredis';
+
+const publisher = new Redis(process.env.REDIS_URL!);
+const subscriber = new Redis(process.env.REDIS_URL!);
+
+interface OrderEvent { orderId: string; status: string }
+
+subscriber.subscribe('orders', (err) => {
+  if (err) console.error('Subscribe error:', err);
+});
+
+subscriber.on('message', (channel, message) => {
+  const event: OrderEvent = JSON.parse(message);
+  console.log(`Order ${event.orderId}: ${event.status}`);
+});
+
+export async function publishOrderEvent(event: OrderEvent) {
+  await publisher.publish('orders', JSON.stringify(event));
+}","import Redis from 'ioredis';
+
+// Bad: reusing same client for sub and commands
+const redis = new Redis();
+
+redis.subscribe('orders');
+redis.on('message', (_ch, msg) => console.log(msg));
+
+// This will fail: subscribed clients cannot run commands
+redis.set('key', 'value');",high,https://redis.io/docs/latest/develop/interact/pubsub/
+12,Redis,"Rate limiting with Redis","Implement token bucket or sliding window rate limiting with Redis using INCR and EXPIRE or sorted sets. Use Lua scripts for atomic operations. Apply per-IP or per-user limits at the middleware level. Return proper 429 status codes with Retry-After headers.","Use atomic Redis operations for rate limiting; implement sliding window for accuracy; return 429 with Retry-After","Dont implement rate limiting with in-memory counters in multi-process setups; dont use non-atomic read-then-write patterns","import redis from './redis';
+import { Request, Response, NextFunction } from 'express';
+
+export function rateLimit(windowSec: number, maxReqs: number) {
+  return async (req: Request, res: Response, next: NextFunction) => {
+    const key = `rl:${req.ip}`;
+    const current = await redis.incr(key);
+    if (current === 1) {
+      await redis.expire(key, windowSec);
+    }
+    if (current > maxReqs) {
+      const ttl = await redis.ttl(key);
+      res.set('Retry-After', String(ttl));
+      return res.status(429).json({ error: 'Too many requests' });
+    }
+    next();
+  };
+}","import { Request, Response, NextFunction } from 'express';
+
+// Bad: in-memory counter, resets on restart, not shared across processes
+const counts = new Map<string, number>();
+
+export function rateLimit(max: number) {
+  return (req: Request, res: Response, next: NextFunction) => {
+    const ip = req.ip ?? 'unknown';
+    const c = (counts.get(ip) ?? 0) + 1;
+    counts.set(ip, c);
+    if (c > max) return res.status(429).send('Too many requests');
+    next();
+  };
+}",critical,https://redis.io/docs/latest/develop/use/pattern/rate-limiter/
+13,Redis,"Session storage with connect-redis","Use connect-redis with express-session to store sessions in Redis for scalable, multi-process session management. Configure TTL, prefix, and serializer. Enable touch to refresh session expiry on activity. Use secure cookie settings in production.","Use connect-redis with explicit TTL and prefix; enable secure cookies in production; use touch for session refresh","Dont store sessions in memory with MemoryStore in production; dont skip secure cookie flags; dont set excessive session TTL","import session from 'express-session';
+import RedisStore from 'connect-redis';
+import redis from './redis';
+import express from 'express';
+
+const app = express();
+
+app.use(session({
+  store: new RedisStore({ client: redis, prefix: 'sess:', ttl: 86400 }),
+  secret: process.env.SESSION_SECRET!,
+  resave: false,
+  saveUninitialized: false,
+  cookie: {
+    secure: process.env.NODE_ENV === 'production',
+    httpOnly: true,
+    maxAge: 86400000,
+    sameSite: 'lax',
+  },
+}));","import session from 'express-session';
+import express from 'express';
+
+const app = express();
+
+// Bad: default MemoryStore leaks memory, not shared across processes
+app.use(session({
+  secret: 'keyboard cat',
+  resave: true,
+  saveUninitialized: true,
+  // No store configured - uses MemoryStore
+  // No secure cookies
+}));",high,https://www.npmjs.com/package/connect-redis
+14,Redis,"Redis Streams for event processing","Use Redis Streams (XADD/XREAD/XREADGROUP) for durable event processing with consumer groups. Streams provide message persistence, consumer acknowledgment, and replay capability. Use consumer groups for parallel processing and XACK for reliable delivery.","Use consumer groups for parallel processing; acknowledge messages with XACK; set MAXLEN to cap stream size","Dont use Pub/Sub when you need message durability; dont forget to XACK processed messages; dont let streams grow unbounded","import redis from './redis';
+
+const STREAM = 'events:orders';
+const GROUP = 'order-processors';
+const CONSUMER = `consumer-${process.pid}`;
+
+export async function initStream() {
+  try {
+    await redis.xgroup('CREATE', STREAM, GROUP, '0', 'MKSTREAM');
+  } catch { /* group may already exist */ }
+}
+
+export async function publishEvent(data: Record<string, string>) {
+  await redis.xadd(STREAM, 'MAXLEN', '~', '10000', '*', ...Object.entries(data).flat());
+}
+
+export async function consumeEvents() {
+  const results = await redis.xreadgroup('GROUP', GROUP, CONSUMER, 'COUNT', 10, 'BLOCK', 5000, 'STREAMS', STREAM, '>');
+  if (results) {
+    for (const [, messages] of results) {
+      for (const [id, fields] of messages) {
+        console.log('Processing:', id, fields);
+        await redis.xack(STREAM, GROUP, id);
+      }
+    }
+  }
+}","import redis from './redis';
+
+// Bad: using Pub/Sub for durable events, messages lost if no subscriber online
+export async function publishEvent(data: Record<string, string>) {
+  await redis.publish('orders', JSON.stringify(data));
+}
+
+// Messages are fire-and-forget, no replay, no acknowledgment",medium,https://redis.io/docs/latest/develop/data-types/streams/
+15,MongoDB,"Mongoose schema and model definition","Define Mongoose schemas with strict typing, validation, and virtuals. Use TypeScript interfaces paired with schemas for type safety. Enable timestamps, set toJSON/toObject transforms, and use schema-level validation for data integrity.","Define TypeScript interfaces alongside schemas; enable timestamps; add toJSON transforms to remove __v and rename _id","Dont use Schema.Types.Mixed without validation; dont skip required fields; dont define models without TypeScript interfaces","import mongoose, { Schema, Document } from 'mongoose';
+
+export interface IUser extends Document {
+  email: string;
+  name: string;
+  role: 'user' | 'admin';
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+const userSchema = new Schema<IUser>({
+  email: { type: String, required: true, unique: true, lowercase: true, trim: true },
+  name: { type: String, required: true, minlength: 2, maxlength: 100 },
+  role: { type: String, enum: ['user', 'admin'], default: 'user' },
+}, {
+  timestamps: true,
+  toJSON: { virtuals: true, versionKey: false, transform: (_, ret) => { ret.id = ret._id; delete ret._id; } },
+});
+
+export const User = mongoose.model<IUser>('User', userSchema);","import mongoose from 'mongoose';
+
+// Bad: no types, no validation, no timestamps config
+const userSchema = new mongoose.Schema({
+  email: String,
+  name: String,
+  role: String,
+  data: mongoose.Schema.Types.Mixed,
+});
+
+export const User = mongoose.model('User', userSchema);",high,https://mongoosejs.com/docs/guide.html
+16,MongoDB,"Mongoose middleware with pre/post hooks","Use Mongoose middleware (pre/post hooks) for cross-cutting concerns like password hashing, audit logging, and soft deletes. Use pre-save for data transformation and pre-find for query modification. Avoid heavy async operations in middleware that slow down queries.","Use pre-save hooks for data transformation; use pre-find for automatic query filters; keep hooks lightweight","Dont put heavy I/O in middleware; dont forget to call next(); dont modify queries in post hooks when pre hooks suffice","import mongoose, { Schema, Document } from 'mongoose';
+import bcrypt from 'bcrypt';
+
+export interface IUser extends Document {
+  email: string;
+  password: string;
+  isDeleted: boolean;
+  comparePassword(candidate: string): Promise<boolean>;
+}
+
+const userSchema = new Schema<IUser>({
+  email: { type: String, required: true, unique: true },
+  password: { type: String, required: true },
+  isDeleted: { type: Boolean, default: false },
+});
+
+userSchema.pre('save', async function () {
+  if (this.isModified('password')) {
+    this.password = await bcrypt.hash(this.password, 12);
+  }
+});
+
+userSchema.pre(/^find/, function (this: mongoose.Query<unknown, IUser>) {
+  this.where({ isDeleted: false });
+});
+
+userSchema.methods.comparePassword = async function (candidate: string) {
+  return bcrypt.compare(candidate, this.password);
+};","import mongoose from 'mongoose';
+import bcrypt from 'bcrypt';
+
+const userSchema = new mongoose.Schema({
+  email: String,
+  password: String,
+});
+
+// Bad: hashing at every call site, easy to forget
+export async function createUser(email: string, password: string) {
+  const hashed = await bcrypt.hash(password, 12);
+  return mongoose.model('User').create({ email, password: hashed });
+}
+// Forgot to hash here:
+export async function resetPassword(userId: string, newPass: string) {
+  return mongoose.model('User').updateOne({ _id: userId }, { password: newPass });
+}",high,https://mongoosejs.com/docs/middleware.html
+17,MongoDB,"Aggregation pipeline best practices","Use MongoDB aggregation pipelines for complex data transformations, grouping, and analytics. Place $match and $project stages early to reduce documents and fields processed. Use $lookup for joins. Type the pipeline result with TypeScript generics.","Place $match stages first to leverage indexes; limit fields with $project early; type aggregation results","Dont load all documents into memory for aggregation in application code; dont skip $match before $group; dont use aggregation for simple find queries","import { User } from './models/user';
+
+interface OrderStats {
+  _id: string;
+  totalOrders: number;
+  totalRevenue: number;
+  avgOrderValue: number;
+}
+
+export async function getOrderStatsByStatus(): Promise<OrderStats[]> {
+  return User.aggregate<OrderStats>([
+    { $match: { createdAt: { $gte: new Date('2024-01-01') } } },
+    { $lookup: { from: 'orders', localField: '_id', foreignField: 'userId', as: 'orders' } },
+    { $unwind: '$orders' },
+    { $group: {
+        _id: '$orders.status',
+        totalOrders: { $sum: 1 },
+        totalRevenue: { $sum: '$orders.amount' },
+        avgOrderValue: { $avg: '$orders.amount' },
+    }},
+    { $sort: { totalRevenue: -1 } },
+  ]);
+}","import { Order } from './models/order';
+
+// Bad: loading all docs to memory, aggregating in JS
+export async function getOrderStatsByStatus() {
+  const orders = await Order.find({});
+  const stats: Record<string, { count: number; total: number }> = {};
+  for (const o of orders) {
+    if (!stats[o.status]) stats[o.status] = { count: 0, total: 0 };
+    stats[o.status].count++;
+    stats[o.status].total += o.amount;
+  }
+  return stats;
+}",high,https://mongoosejs.com/docs/api/aggregate.html
+18,MongoDB,"Indexing strategy for MongoDB","Create indexes on fields used in queries, sort operations, and unique constraints. Use compound indexes for multi-field queries matching left-prefix order. Use text indexes for search. Monitor with explain() and drop unused indexes.","Use compound indexes matching query patterns; check with explain(); use TTL indexes for expiring data","Dont index every field; dont create redundant indexes; dont ignore index size impact on RAM","import mongoose, { Schema } from 'mongoose';
+
+const orderSchema = new Schema({
+  userId: { type: Schema.Types.ObjectId, ref: 'User', required: true, index: true },
+  status: { type: String, enum: ['pending', 'processing', 'shipped', 'delivered'], required: true },
+  total: { type: Number, required: true },
+  createdAt: { type: Date, default: Date.now },
+});
+
+// Compound index for common query: find orders by user + status
+orderSchema.index({ userId: 1, status: 1, createdAt: -1 });
+// TTL index to auto-delete old draft orders after 30 days
+orderSchema.index({ createdAt: 1 }, { expireAfterSeconds: 2592000, partialFilterExpression: { status: 'pending' } });
+// Text index for order search
+orderSchema.index({ notes: 'text' });
+
+export const Order = mongoose.model('Order', orderSchema);","import mongoose, { Schema } from 'mongoose';
+
+const orderSchema = new Schema({
+  userId: { type: Schema.Types.ObjectId, ref: 'User' },
+  status: String,
+  total: Number,
+  createdAt: Date,
+  // Bad: no indexes defined, relying on _id only
+  // All queries will do full collection scans
+});
+
+export const Order = mongoose.model('Order', orderSchema);",high,https://mongoosejs.com/docs/guide.html#indexes
+19,MongoDB,"Native driver vs Mongoose trade-offs","Choose the MongoDB native driver for maximum performance and flexibility, or Mongoose for schema enforcement and developer productivity. Use Mongoose for CRUD-heavy apps with well-defined schemas. Use the native driver for high-throughput pipelines or when Mongoose overhead is measurable.","Use Mongoose for schema validation and convenience; use native driver for performance-critical pipelines; evaluate both for your use case","Dont use Mongoose if you need raw performance and dont need schema validation; dont use native driver if your team benefits from Mongoose structure","// Mongoose: structured, validated, typed
+import mongoose from 'mongoose';
+
+const conn = await mongoose.connect(process.env.MONGODB_URI!, {
+  maxPoolSize: 10,
+  serverSelectionTimeoutMS: 5000,
+});
+
+// Native driver: direct, flexible, lower overhead
+import { MongoClient } from 'mongodb';
+
+const client = new MongoClient(process.env.MONGODB_URI!, {
+  maxPoolSize: 10,
+  serverSelectionTimeoutMS: 5000,
+});
+const db = client.db('myapp');
+const users = db.collection('users');
+const result = await users.findOne({ email: 'user@example.com' });","// Bad: mixing both without clear boundaries
+import mongoose from 'mongoose';
+import { MongoClient } from 'mongodb';
+
+// Using both drivers on the same collections
+// causes confusion about which connection to use
+const User = mongoose.model('User', new mongoose.Schema({ email: String }));
+const client = new MongoClient(process.env.MONGODB_URI!);
+// Sometimes querying via Mongoose, sometimes native
+const user1 = await User.findOne({ email: 'a@b.com' });
+const user2 = await client.db().collection('users').findOne({ email: 'a@b.com' });",medium,https://www.mongodb.com/docs/drivers/node/current/
+20,General,"Connection health checks","Implement health check endpoints that verify database connectivity. Check PostgreSQL with a simple SELECT 1, Redis with PING, and MongoDB with db.admin().ping(). Use timeouts to prevent health checks from hanging. Integrate with load balancers and orchestrators.","Implement /health endpoints that verify each database connection; use timeouts; return structured health status","Dont skip database connectivity in health checks; dont let health checks hang without timeouts; dont expose connection details in health responses","import { pool } from './db';
+import redis from './redis';
+import mongoose from 'mongoose';
+import express from 'express';
+
+const app = express();
+
+app.get('/health', async (_req, res) => {
+  const checks: Record<string, string> = {};
+  try {
+    await pool.query('SELECT 1');
+    checks.postgres = 'ok';
+  } catch { checks.postgres = 'error'; }
+  try {
+    await redis.ping();
+    checks.redis = 'ok';
+  } catch { checks.redis = 'error'; }
+  try {
+    await mongoose.connection.db!.admin().ping();
+    checks.mongodb = 'ok';
+  } catch { checks.mongodb = 'error'; }
+  const healthy = Object.values(checks).every((v) => v === 'ok');
+  res.status(healthy ? 200 : 503).json({ status: healthy ? 'healthy' : 'degraded', checks });
+});","import express from 'express';
+
+const app = express();
+
+// Bad: health check without database verification
+app.get('/health', (_req, res) => {
+  res.json({ status: 'ok' });
+  // Does not check if databases are reachable
+  // Load balancer thinks app is healthy when DB is down
+});",critical,https://node-postgres.com/guides/project-structure
+21,General,"Database seeding strategies","Create idempotent seed scripts that populate development and test databases with realistic data. Use upserts (ON CONFLICT) to avoid duplicates. Separate seed data from migration scripts. Support multiple environments (dev, test, staging).","Use upsert patterns for idempotent seeding; separate seeds from migrations; tag seeds by environment","Dont use INSERT without conflict handling in seeds; dont seed production with test data; dont hardcode IDs that conflict with sequences","import { pool } from './db';
+
+interface SeedUser {
+  email: string;
+  name: string;
+  role: string;
+}
+
+const seedUsers: SeedUser[] = [
+  { email: 'admin@test.com', name: 'Test Admin', role: 'admin' },
+  { email: 'user@test.com', name: 'Test User', role: 'user' },
+];
+
+export async function seed() {
+  for (const user of seedUsers) {
+    await pool.query(
+      `INSERT INTO users (email, name, role)
+       VALUES ($1, $2, $3)
+       ON CONFLICT (email) DO UPDATE SET name = $2, role = $3`,
+      [user.email, user.name, user.role]
+    );
+  }
+  console.log('Seeding complete');
+}","import { pool } from './db';
+
+// Bad: not idempotent, will fail on re-run due to unique constraints
+export async function seed() {
+  await pool.query(""INSERT INTO users (email, name) VALUES ('admin@test.com', 'Admin')"");
+  await pool.query(""INSERT INTO users (email, name) VALUES ('user@test.com', 'User')"");
+  // Throws on second run: duplicate key violation
+}",medium,https://node-postgres.com/features/queries
+22,General,"Handling database errors gracefully","Catch and classify database errors by code or type. PostgreSQL errors have a code field (23505 for unique violation, 23503 for foreign key). Map database errors to application-level errors with user-friendly messages. Never expose raw database errors to clients.","Catch errors by database error code; map to application errors; log full error server-side; return safe messages to clients","Dont expose raw database errors to API clients; dont catch errors silently without logging; dont use generic catch-all error handling","import { pool } from './db';
+
+class AppError extends Error {
+  constructor(message: string, public statusCode: number) { super(message); }
+}
+
+export async function createUser(email: string, name: string) {
+  try {
+    const { rows } = await pool.query(
+      'INSERT INTO users (email, name) VALUES ($1, $2) RETURNING *',
+      [email, name]
+    );
+    return rows[0];
+  } catch (err: any) {
+    if (err.code === '23505') {
+      throw new AppError('A user with this email already exists', 409);
+    }
+    if (err.code === '23503') {
+      throw new AppError('Referenced resource not found', 404);
+    }
+    console.error('Database error:', err);
+    throw new AppError('Internal server error', 500);
+  }
+}","import { pool } from './db';
+
+// Bad: leaking raw database errors to the client
+export async function createUser(email: string, name: string) {
+  const { rows } = await pool.query(
+    'INSERT INTO users (email, name) VALUES ($1, $2) RETURNING *',
+    [email, name]
+  );
+  return rows[0];
+  // Unhandled: raw PG error with table names, constraints exposed to client
+}",critical,https://node-postgres.com/apis/client#error-handling
+23,General,"Query logging and monitoring","Log slow queries, failed queries, and query durations for observability. Use query middleware or wrapper functions to capture timing. Integrate with structured logging (pino, winston). Set slow-query thresholds and alert on them.","Log query duration and text for slow queries; use structured logging; set alerting thresholds; redact sensitive parameters","Dont log query parameters containing PII or passwords; dont skip logging for failed queries; dont use console.log in production","import { pool } from './db';
+import pino from 'pino';
+
+const logger = pino({ level: 'info' });
+const SLOW_QUERY_MS = 500;
+
+export async function query<T>(text: string, params?: unknown[]) {
+  const start = Date.now();
+  try {
+    const result = await pool.query<T>(text, params);
+    const duration = Date.now() - start;
+    if (duration > SLOW_QUERY_MS) {
+      logger.warn({ text, duration, rows: result.rowCount }, 'Slow query detected');
+    }
+    return result;
+  } catch (err) {
+    const duration = Date.now() - start;
+    logger.error({ text, duration, error: (err as Error).message }, 'Query failed');
+    throw err;
+  }
+}","import { pool } from './db';
+
+// Bad: no logging, no monitoring, silent failures
+export async function query(text: string, params?: unknown[]) {
+  return pool.query(text, params);
+  // No duration tracking
+  // No slow query detection
+  // No error logging
+}",high,https://node-postgres.com/guides/project-structure
+24,General,"Database backup strategies","Automate database backups using pg_dump for PostgreSQL, Redis RDB/AOF snapshots, and mongodump for MongoDB. Schedule backups with cron or cloud-native tools. Test restore procedures regularly. Store backups offsite with encryption.","Automate backups with scheduled jobs; test restore procedures; encrypt and store backups offsite; use point-in-time recovery for PostgreSQL","Dont rely on manual backups; dont store backups only on the database server; dont skip testing restore procedures","import { exec } from 'child_process';
+import { promisify } from 'util';
+
+const execAsync = promisify(exec);
+
+export async function backupPostgres(): Promise<string> {
+  const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const filename = `backup-${timestamp}.sql.gz`;
+  await execAsync(
+    `pg_dump ""${process.env.DATABASE_URL}"" | gzip > /backups/${filename}`
+  );
+  return filename;
+}
+
+export async function backupRedis(): Promise<void> {
+  await execAsync('redis-cli BGSAVE');
+}
+
+export async function backupMongoDB(): Promise<string> {
+  const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const dir = `/backups/mongo-${timestamp}`;
+  await execAsync(`mongodump --uri=""${process.env.MONGODB_URI}"" --out=${dir} --gzip`);
+  return dir;
+}","// Bad: no automated backup, manual process only
+// Backup procedure documented in wiki but never automated
+// No restore testing
+// Backups stored on same server as database
+// No encryption on backup files
+//
+// To backup: ssh into server and run pg_dump manually
+// Last backup: 3 months ago
+export function backup() {
+  console.log('Please SSH into the server and run pg_dump manually');
+}",critical,https://www.postgresql.org/docs/current/backup.html
+25,General,"Multi-tenancy patterns","Implement multi-tenancy with row-level isolation (tenant_id column), schema-level isolation (separate schemas per tenant), or database-level isolation. Row-level is simplest and most cost-effective. Always enforce tenant context in queries and middleware.","Use row-level security with tenant_id columns; enforce tenant context in middleware; use PostgreSQL RLS policies","Dont rely on application code alone for tenant isolation; dont forget tenant_id in every query WHERE clause; dont mix tenant data without isolation","import { pool } from './db';
+import { Request, Response, NextFunction } from 'express';
+
+// Middleware to set tenant context
+export function tenantMiddleware(req: Request, _res: Response, next: NextFunction) {
+  const tenantId = req.headers['x-tenant-id'] as string;
+  if (!tenantId) return _res.status(400).json({ error: 'Missing tenant ID' });
+  (req as any).tenantId = tenantId;
+  next();
+}
+
+export async function getTenantUsers(tenantId: string) {
+  const { rows } = await pool.query(
+    'SELECT * FROM users WHERE tenant_id = $1 ORDER BY created_at DESC',
+    [tenantId]
+  );
+  return rows;
+}
+
+// PostgreSQL RLS setup (run in migration)
+// ALTER TABLE users ENABLE ROW LEVEL SECURITY;
+// CREATE POLICY tenant_isolation ON users USING (tenant_id = current_setting('app.tenant_id'));","import { pool } from './db';
+
+// Bad: no tenant isolation, data leak between tenants
+export async function getUsers() {
+  const { rows } = await pool.query('SELECT * FROM users');
+  return rows;
+  // Returns ALL users across all tenants
+  // No tenant_id filtering
+  // Any tenant can see other tenants data
+}",critical,https://www.postgresql.org/docs/current/ddl-rowsecurity.html

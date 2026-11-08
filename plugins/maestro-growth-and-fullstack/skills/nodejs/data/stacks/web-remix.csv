@@ -1,0 +1,1025 @@
+No,Category,Guideline,Description,Do,Dont,Code Good,Code Bad,Severity,Docs URL
+1,Route Setup,"Use file-based routing convention","Remix uses a file-system routing convention where files in the routes directory map to URL paths. Use dot-delimiters for nested URL segments and underscores for layout nesting.","Use the routes directory with proper naming conventions like routes/products.$id.tsx for dynamic segments","Do not manually configure routes unless absolutely necessary; do not use path separators in filenames","// app/routes/products.$id.tsx
+import type { LoaderFunctionArgs } from '@remix-run/node';
+import { json } from '@remix-run/node';
+import { useLoaderData } from '@remix-run/react';
+
+export async function loader({ params }: LoaderFunctionArgs) {
+  const product = await getProduct(params.id!);
+  if (!product) throw new Response('Not Found', { status: 404 });
+  return json({ product });
+}
+
+export default function ProductPage() {
+  const { product } = useLoaderData<typeof loader>();
+  return <h1>{product.name}</h1>;
+}","// WRONG: Using manual route config for simple routes
+// WRONG: Using path separators in filenames
+// app/routes/products/[id].tsx  <-- Not Remix convention
+
+// WRONG: Defining routes manually when file-based works
+const routes = [
+  { path: '/products/:id', component: ProductPage }
+];",error,https://remix.run/docs/en/main/file-conventions/routes
+2,Loader,"Use loader for server-side GET data fetching","Loaders run on the server and provide data to route components on GET requests. They receive params, request, and context. Always return data using the json() helper for proper serialization.","Return data via json() with proper types; throw Response objects for errors","Do not fetch data in useEffect on initial render; do not return raw objects without json()","// app/routes/dashboard.tsx
+import type { LoaderFunctionArgs } from '@remix-run/node';
+import { json } from '@remix-run/node';
+import { requireUser } from '~/services/auth.server';
+import { getMetrics } from '~/services/metrics.server';
+
+export async function loader({ request }: LoaderFunctionArgs) {
+  const user = await requireUser(request);
+  const metrics = await getMetrics(user.id);
+  return json({ user, metrics }, {
+    headers: { 'Cache-Control': 'private, max-age=60' },
+  });
+}","// BAD: Fetching data client-side instead of using loader
+export default function Dashboard() {
+  const [data, setData] = useState(null);
+  useEffect(() => {
+    fetch('/api/dashboard')
+      .then(r => r.json())
+      .then(setData);
+  }, []);
+  return <div>{data?.metrics}</div>;
+}",error,https://remix.run/docs/en/main/route/loader
+3,Action,"Use action for server-side POST/PUT/DELETE mutations","Actions handle non-GET form submissions. They run on the server and can access databases, send emails, etc. Use formData to parse the request body and return appropriate responses.","Parse formData from the request; validate inputs; return json with errors or redirect on success","Do not use API routes for mutations that correspond to a page; do not skip validation","// app/routes/contacts.new.tsx
+import type { ActionFunctionArgs } from '@remix-run/node';
+import { json, redirect } from '@remix-run/node';
+import { z } from 'zod';
+
+const ContactSchema = z.object({
+  name: z.string().min(1, 'Name is required'),
+  email: z.string().email('Invalid email'),
+});
+
+export async function action({ request }: ActionFunctionArgs) {
+  const formData = await request.formData();
+  const rawData = Object.fromEntries(formData);
+  const result = ContactSchema.safeParse(rawData);
+  if (!result.success) {
+    return json({ errors: result.error.flatten().fieldErrors }, { status: 400 });
+  }
+  const contact = await createContact(result.data);
+  return redirect(`/contacts/${contact.id}`);
+}","// BAD: Using a separate API endpoint instead of action
+// app/routes/api.contacts.ts
+export async function action({ request }: ActionFunctionArgs) {
+  const body = await request.json(); // Not using formData
+  const contact = await createContact(body); // No validation
+  return json(contact);
+}
+// Then calling fetch('/api/contacts') from the component",error,https://remix.run/docs/en/main/route/action
+4,useLoaderData,"Use useLoaderData with typeof loader for type safety","useLoaderData provides the data returned by the route's loader with full type inference when used with typeof loader. This gives end-to-end type safety from loader to component.","Use useLoaderData<typeof loader>() for automatic type inference","Do not manually type useLoaderData; do not destructure without the generic parameter","// app/routes/users.$id.tsx
+import type { LoaderFunctionArgs } from '@remix-run/node';
+import { json } from '@remix-run/node';
+import { useLoaderData } from '@remix-run/react';
+
+export async function loader({ params }: LoaderFunctionArgs) {
+  const user = await db.user.findUnique({
+    where: { id: params.id },
+    select: { id: true, name: true, email: true, role: true },
+  });
+  if (!user) throw new Response('Not Found', { status: 404 });
+  return json({ user });
+}
+
+export default function UserProfile() {
+  const { user } = useLoaderData<typeof loader>();
+  // user is fully typed: { id: string; name: string; email: string; role: string }
+  return <h1>{user.name}</h1>;
+}","// BAD: Manually typing the loader data
+interface LoaderData {
+  user: { id: string; name: string; email: string; role: string };
+}
+
+export default function UserProfile() {
+  // Manual type gets out of sync with the actual loader
+  const { user } = useLoaderData() as LoaderData;
+  return <h1>{user.name}</h1>;
+}",warning,https://remix.run/docs/en/main/hooks/use-loader-data
+5,useActionData,"Use useActionData for action response handling","useActionData returns the data from the most recent action submission. Use it to display validation errors or success messages after form submissions.","Use useActionData<typeof action>() to get typed action responses; check for presence before rendering","Do not ignore action return values; do not skip error display to users","// app/routes/login.tsx
+import type { ActionFunctionArgs } from '@remix-run/node';
+import { json, redirect } from '@remix-run/node';
+import { Form, useActionData } from '@remix-run/react';
+
+export async function action({ request }: ActionFunctionArgs) {
+  const formData = await request.formData();
+  const email = formData.get('email') as string;
+  const password = formData.get('password') as string;
+  const errors: Record<string, string> = {};
+  if (!email) errors.email = 'Email is required';
+  if (!password) errors.password = 'Password is required';
+  if (Object.keys(errors).length > 0) {
+    return json({ errors }, { status: 400 });
+  }
+  const user = await authenticate(email, password);
+  if (!user) return json({ errors: { form: 'Invalid credentials' } }, { status: 401 });
+  return redirect('/dashboard');
+}
+
+export default function Login() {
+  const actionData = useActionData<typeof action>();
+  return (
+    <Form method=""post"">
+      <input name=""email"" type=""email"" />
+      {actionData?.errors?.email && <span>{actionData.errors.email}</span>}
+      <input name=""password"" type=""password"" />
+      {actionData?.errors?.password && <span>{actionData.errors.password}</span>}
+      {actionData?.errors?.form && <div className=""error"">{actionData.errors.form}</div>}
+      <button type=""submit"">Log In</button>
+    </Form>
+  );
+}","// BAD: Not handling action errors in the UI
+export default function Login() {
+  // Ignoring actionData entirely -- user gets no feedback
+  return (
+    <Form method=""post"">
+      <input name=""email"" type=""email"" />
+      <input name=""password"" type=""password"" />
+      <button type=""submit"">Log In</button>
+    </Form>
+  );
+}",warning,https://remix.run/docs/en/main/hooks/use-action-data
+6,Error Boundary,"Export ErrorBoundary for route-level error handling","Remix catches errors in loaders, actions, and rendering and displays the nearest ErrorBoundary. Use useRouteError() to access the error. Handle both Response and Error types.","Export an ErrorBoundary component from every route that can throw; use isRouteErrorResponse to differentiate","Do not let errors propagate to the root without catching; do not show raw error messages in production","// app/routes/products.$id.tsx
+import { isRouteErrorResponse, useRouteError } from '@remix-run/react';
+
+export function ErrorBoundary() {
+  const error = useRouteError();
+
+  if (isRouteErrorResponse(error)) {
+    return (
+      <div className=""error-container"">
+        <h1>{error.status} {error.statusText}</h1>
+        <p>{error.status === 404 ? 'Product not found.' : 'Something went wrong.'}</p>
+      </div>
+    );
+  }
+
+  const message = error instanceof Error ? error.message : 'Unknown error';
+  return (
+    <div className=""error-container"">
+      <h1>Unexpected Error</h1>
+      <p>{process.env.NODE_ENV === 'development' ? message : 'Please try again later.'}</p>
+    </div>
+  );
+}","// BAD: No ErrorBoundary -- errors bubble up and break the whole page
+// Also BAD: Exposing raw error details in production
+export function ErrorBoundary() {
+  const error = useRouteError();
+  return (
+    <div>
+      <h1>Error</h1>
+      <pre>{JSON.stringify(error, null, 2)}</pre>
+      <pre>{error.stack}</pre>
+    </div>
+  );
+}",error,https://remix.run/docs/en/main/route/error-boundary
+7,Forms,"Use Remix <Form> component instead of HTML <form>","The Remix <Form> component provides progressive enhancement, automatic revalidation after submission, and integrates with useNavigation and useActionData. Always specify the method.","Use <Form method=""post""> for mutations; use <Form method=""get""> for search/filter forms","Do not use plain HTML <form> or fetch/axios for form submissions that map to routes","// app/routes/tasks.tsx
+import { Form, useLoaderData } from '@remix-run/react';
+import type { ActionFunctionArgs, LoaderFunctionArgs } from '@remix-run/node';
+import { json, redirect } from '@remix-run/node';
+
+export async function loader({ request }: LoaderFunctionArgs) {
+  const tasks = await getTasks();
+  return json({ tasks });
+}
+
+export async function action({ request }: ActionFunctionArgs) {
+  const formData = await request.formData();
+  const intent = formData.get('intent');
+  if (intent === 'create') {
+    await createTask(formData.get('title') as string);
+  } else if (intent === 'delete') {
+    await deleteTask(formData.get('taskId') as string);
+  }
+  return redirect('/tasks');
+}
+
+export default function Tasks() {
+  const { tasks } = useLoaderData<typeof loader>();
+  return (
+    <div>
+      <Form method=""post"">
+        <input name=""title"" placeholder=""New task"" required />
+        <button name=""intent"" value=""create"">Add</button>
+      </Form>
+      <ul>
+        {tasks.map((task) => (
+          <li key={task.id}>
+            {task.title}
+            <Form method=""post"" style={{ display: 'inline' }}>
+              <input type=""hidden"" name=""taskId"" value={task.id} />
+              <button name=""intent"" value=""delete"">Delete</button>
+            </Form>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}","// BAD: Using fetch instead of <Form>
+export default function Tasks() {
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    await fetch('/api/tasks', {
+      method: 'POST',
+      body: JSON.stringify({ title }),
+    });
+    // Must manually refresh data
+    window.location.reload();
+  };
+  return <form onSubmit={handleSubmit}>...</form>;
+}",error,https://remix.run/docs/en/main/components/form
+8,useFetcher,"Use useFetcher for non-navigation mutations and background loads","useFetcher lets you interact with loaders and actions without causing a navigation. Perfect for inline updates, favorites, newsletter signups, and other UI interactions that should not change the URL.","Use fetcher.Form for inline mutations; use fetcher.load() for background data fetching","Do not use useFetcher when a full page navigation is intended; do not forget to handle fetcher.state","// app/routes/articles.tsx
+import { useFetcher } from '@remix-run/react';
+
+function FavoriteButton({ articleId, isFavorited }: { articleId: string; isFavorited: boolean }) {
+  const fetcher = useFetcher();
+  const optimisticFavorited = fetcher.formData
+    ? fetcher.formData.get('favorite') === 'true'
+    : isFavorited;
+
+  return (
+    <fetcher.Form method=""post"" action=""/api/favorites"">
+      <input type=""hidden"" name=""articleId"" value={articleId} />
+      <button
+        name=""favorite""
+        value={optimisticFavorited ? 'false' : 'true'}
+        className={optimisticFavorited ? 'favorited' : ''}
+        disabled={fetcher.state !== 'idle'}
+      >
+        {optimisticFavorited ? 'Unfavorite' : 'Favorite'}
+      </button>
+    </fetcher.Form>
+  );
+}","// BAD: Using regular Form for inline toggle causes full navigation
+import { Form } from '@remix-run/react';
+
+function FavoriteButton({ articleId }: { articleId: string }) {
+  return (
+    <Form method=""post"" action=""/api/favorites"">
+      <input type=""hidden"" name=""articleId"" value={articleId} />
+      {/* This navigates away from the current page */}
+      <button name=""favorite"" value=""true"">Favorite</button>
+    </Form>
+  );
+}",warning,https://remix.run/docs/en/main/hooks/use-fetcher
+9,useNavigation,"Use useNavigation to show loading and submitting states","useNavigation provides the current navigation state (idle, loading, submitting) and the form data being submitted. Use it to build loading indicators and disable buttons during submission.","Use navigation.state to show spinners; use navigation.formData for optimistic UI","Do not show no feedback during loading; do not forget to disable submit buttons while submitting","// app/routes/posts.new.tsx
+import { Form, useNavigation } from '@remix-run/react';
+
+export default function NewPost() {
+  const navigation = useNavigation();
+  const isSubmitting = navigation.state === 'submitting';
+
+  return (
+    <Form method=""post"">
+      <fieldset disabled={isSubmitting}>
+        <label>
+          Title: <input name=""title"" required />
+        </label>
+        <label>
+          Content: <textarea name=""content"" rows={10} required />
+        </label>
+        <button type=""submit"">
+          {isSubmitting ? 'Publishing...' : 'Publish Post'}
+        </button>
+      </fieldset>
+      {navigation.state === 'loading' && (
+        <p className=""loading-indicator"">Redirecting...</p>
+      )}
+    </Form>
+  );
+}","// BAD: No loading feedback, users can double-submit
+export default function NewPost() {
+  return (
+    <Form method=""post"">
+      <input name=""title"" required />
+      <textarea name=""content"" rows={10} required />
+      {/* No disabled state, no loading indicator */}
+      <button type=""submit"">Publish Post</button>
+    </Form>
+  );
+}",warning,https://remix.run/docs/en/main/hooks/use-navigation
+10,Session Management,"Use createCookieSessionStorage for session management","Remix provides built-in session management with createCookieSessionStorage. Sessions are stored in encrypted cookies and support getSession, commitSession, and destroySession operations.","Create a session utility in a .server.ts file; set secure cookie options; use environment variables for secrets","Do not store sensitive data unencrypted; do not use hardcoded secrets; do not skip httpOnly and secure flags","// app/services/session.server.ts
+import { createCookieSessionStorage } from '@remix-run/node';
+
+if (!process.env.SESSION_SECRET) {
+  throw new Error('SESSION_SECRET must be set');
+}
+
+export const sessionStorage = createCookieSessionStorage({
+  cookie: {
+    name: '__session',
+    httpOnly: true,
+    maxAge: 60 * 60 * 24 * 30, // 30 days
+    path: '/',
+    sameSite: 'lax',
+    secrets: [process.env.SESSION_SECRET],
+    secure: process.env.NODE_ENV === 'production',
+  },
+});
+
+export async function getSession(request: Request) {
+  return sessionStorage.getSession(request.headers.get('Cookie'));
+}
+
+export async function commitSession(session: Awaited<ReturnType<typeof getSession>>) {
+  return sessionStorage.commitSession(session);
+}
+
+export async function destroySession(session: Awaited<ReturnType<typeof getSession>>) {
+  return sessionStorage.destroySession(session);
+}","// BAD: Hardcoded secret and insecure cookie settings
+import { createCookieSessionStorage } from '@remix-run/node';
+
+export const sessionStorage = createCookieSessionStorage({
+  cookie: {
+    name: 'session',
+    secrets: ['my-secret-123'], // Hardcoded secret!
+    // Missing httpOnly -- XSS vulnerable
+    // Missing secure -- sent over HTTP
+    // Missing sameSite -- CSRF vulnerable
+  },
+});",error,https://remix.run/docs/en/main/utils/sessions
+11,Authentication,"Implement session-based authentication with requireUser pattern","Create a requireUser helper that checks the session and redirects to login if unauthenticated. Use this in loaders and actions to protect routes consistently.","Create a reusable requireUser function in a .server.ts file; throw redirect to login if no user","Do not check auth in every loader individually; do not store passwords in sessions","// app/services/auth.server.ts
+import { redirect } from '@remix-run/node';
+import { getSession } from './session.server';
+import { db } from './db.server';
+
+export async function getUserId(request: Request): Promise<string | null> {
+  const session = await getSession(request);
+  const userId = session.get('userId');
+  return typeof userId === 'string' ? userId : null;
+}
+
+export async function requireUser(request: Request) {
+  const userId = await getUserId(request);
+  if (!userId) {
+    const url = new URL(request.url);
+    throw redirect(`/login?redirectTo=${encodeURIComponent(url.pathname)}`);
+  }
+  const user = await db.user.findUnique({ where: { id: userId } });
+  if (!user) {
+    throw redirect('/login');
+  }
+  return user;
+}
+
+// Usage in a loader:
+// export async function loader({ request }: LoaderFunctionArgs) {
+//   const user = await requireUser(request);
+//   return json({ user });
+// }","// BAD: Checking auth inline in every loader
+export async function loader({ request }: LoaderFunctionArgs) {
+  const session = await getSession(request);
+  const userId = session.get('userId');
+  if (!userId) {
+    return redirect('/login');
+  }
+  // Duplicated in every single protected route
+  const user = await db.user.findUnique({ where: { id: userId } });
+  if (!user) return redirect('/login');
+  return json({ user });
+}",error,https://remix.run/docs/en/main/utils/sessions
+12,Database Access,"Use .server.ts suffix for server-only modules","Files ending in .server.ts are excluded from the browser bundle. Use this for database access, API keys, and any server-only code to prevent leaking secrets or importing heavy dependencies on the client.","Put all database queries, API keys, and server-only utilities in .server.ts files","Do not import server-only modules from client components; do not put db credentials in shared files","// app/models/user.server.ts
+import { db } from '~/services/db.server';
+import bcrypt from 'bcryptjs';
+
+export async function getUserById(id: string) {
+  return db.user.findUnique({
+    where: { id },
+    select: { id: true, email: true, name: true, role: true },
+  });
+}
+
+export async function verifyLogin(email: string, password: string) {
+  const user = await db.user.findUnique({ where: { email } });
+  if (!user || !user.passwordHash) return null;
+  const isValid = await bcrypt.compare(password, user.passwordHash);
+  return isValid ? { id: user.id, email: user.email, name: user.name } : null;
+}
+
+export async function createUser(email: string, password: string, name: string) {
+  const passwordHash = await bcrypt.hash(password, 10);
+  return db.user.create({
+    data: { email, passwordHash, name },
+    select: { id: true, email: true, name: true },
+  });
+}","// BAD: Database code in a file without .server suffix
+// app/models/user.ts  <-- Missing .server suffix!
+import { PrismaClient } from '@prisma/client';
+
+// This could end up in the browser bundle,
+// leaking the database connection string
+const prisma = new PrismaClient({
+  datasources: { db: { url: process.env.DATABASE_URL } }
+});
+
+export async function getUser(id: string) {
+  return prisma.user.findUnique({ where: { id } });
+}",error,https://remix.run/docs/en/main/file-conventions/-server
+13,Nested Routes,"Use nested routes for shared layouts and parent/child patterns","Remix supports nested routing where child routes render inside their parent's <Outlet>. This enables shared layouts, navigation, and data loading hierarchies.","Use Outlet to render child routes; share layout and navigation in parent routes","Do not duplicate layout markup across sibling routes; do not skip Outlet in parent routes","// app/routes/dashboard.tsx (parent layout)
+import type { LoaderFunctionArgs } from '@remix-run/node';
+import { json } from '@remix-run/node';
+import { NavLink, Outlet, useLoaderData } from '@remix-run/react';
+import { requireUser } from '~/services/auth.server';
+
+export async function loader({ request }: LoaderFunctionArgs) {
+  const user = await requireUser(request);
+  return json({ user });
+}
+
+export default function DashboardLayout() {
+  const { user } = useLoaderData<typeof loader>();
+  return (
+    <div className=""dashboard"">
+      <aside>
+        <p>Welcome, {user.name}</p>
+        <nav>
+          <NavLink to=""/dashboard"" end>Overview</NavLink>
+          <NavLink to=""/dashboard/settings"">Settings</NavLink>
+          <NavLink to=""/dashboard/billing"">Billing</NavLink>
+        </nav>
+      </aside>
+      <main>
+        <Outlet />
+      </main>
+    </div>
+  );
+}
+
+// app/routes/dashboard._index.tsx (child index route)
+export default function DashboardIndex() {
+  return <h2>Dashboard Overview</h2>;
+}","// BAD: Duplicating layout in every child route
+// app/routes/dashboard.settings.tsx
+export default function Settings() {
+  return (
+    <div className=""dashboard"">
+      <aside>
+        {/* Duplicated sidebar nav in every child */}
+        <nav>
+          <a href=""/dashboard"">Overview</a>
+          <a href=""/dashboard/settings"">Settings</a>
+        </nav>
+      </aside>
+      <main>
+        <h2>Settings</h2>
+      </main>
+    </div>
+  );
+}",warning,https://remix.run/docs/en/main/discussion/routes
+14,Params,"Use params from loader args and useParams for dynamic segments","Dynamic route segments (prefixed with $) are available in loader/action params and via the useParams hook. Always validate params before use.","Access params from LoaderFunctionArgs; validate and parse params; use invariant for required params","Do not use params without validation; do not assume params are always present","// app/routes/teams.$teamId.members.$memberId.tsx
+import type { LoaderFunctionArgs } from '@remix-run/node';
+import { json } from '@remix-run/node';
+import { useLoaderData } from '@remix-run/react';
+import invariant from 'tiny-invariant';
+
+export async function loader({ params }: LoaderFunctionArgs) {
+  invariant(params.teamId, 'teamId is required');
+  invariant(params.memberId, 'memberId is required');
+
+  const member = await db.teamMember.findFirst({
+    where: {
+      teamId: params.teamId,
+      userId: params.memberId,
+    },
+    include: { user: true, team: true },
+  });
+
+  if (!member) {
+    throw new Response('Member not found', { status: 404 });
+  }
+
+  return json({ member });
+}
+
+export default function TeamMember() {
+  const { member } = useLoaderData<typeof loader>();
+  return <h1>{member.user.name} - {member.team.name}</h1>;
+}","// BAD: Using params without validation
+export async function loader({ params }: LoaderFunctionArgs) {
+  // params.teamId could be undefined -- no validation!
+  const member = await db.teamMember.findFirst({
+    where: {
+      teamId: params.teamId!, // Non-null assertion is dangerous
+      userId: params.memberId!,
+    },
+  });
+  return json({ member }); // Could return null -- component will crash
+}",warning,https://remix.run/docs/en/main/route/loader#params
+15,Search Params,"Use useSearchParams and loader request.url for URL search parameters","Search params allow bookmarkable filter/search state. Use <Form method=""get""> to update search params via the URL, and read them in the loader for server-side filtering.","Use <Form method=""get""> for search; read URL search params in the loader; use useSearchParams for client reads","Do not use client-side state for filterable/bookmarkable data; do not forget to parse types from search params","// app/routes/products.tsx
+import type { LoaderFunctionArgs } from '@remix-run/node';
+import { json } from '@remix-run/node';
+import { Form, useLoaderData, useSearchParams } from '@remix-run/react';
+
+export async function loader({ request }: LoaderFunctionArgs) {
+  const url = new URL(request.url);
+  const query = url.searchParams.get('q') ?? '';
+  const category = url.searchParams.get('category') ?? 'all';
+  const page = Math.max(1, Number(url.searchParams.get('page') ?? '1'));
+
+  const { products, total } = await searchProducts({ query, category, page, limit: 20 });
+  return json({ products, total, query, category, page });
+}
+
+export default function Products() {
+  const { products, total, query, category, page } = useLoaderData<typeof loader>();
+  const [searchParams] = useSearchParams();
+
+  return (
+    <div>
+      <Form method=""get"">
+        <input name=""q"" defaultValue={query} placeholder=""Search..."" />
+        <select name=""category"" defaultValue={category}>
+          <option value=""all"">All</option>
+          <option value=""electronics"">Electronics</option>
+          <option value=""clothing"">Clothing</option>
+        </select>
+        <button type=""submit"">Search</button>
+      </Form>
+      <p>Showing {products.length} of {total} results</p>
+      <ul>{products.map(p => <li key={p.id}>{p.name}</li>)}</ul>
+    </div>
+  );
+}","// BAD: Using client-side state for search -- not bookmarkable
+export default function Products() {
+  const [query, setQuery] = useState('');
+  const [products, setProducts] = useState([]);
+
+  useEffect(() => {
+    fetch(`/api/products?q=${query}`)
+      .then(r => r.json())
+      .then(setProducts);
+  }, [query]);
+
+  return (
+    <div>
+      <input value={query} onChange={e => setQuery(e.target.value)} />
+      <ul>{products.map(p => <li key={p.id}>{p.name}</li>)}</ul>
+    </div>
+  );
+}",warning,https://remix.run/docs/en/main/hooks/use-search-params
+16,Redirects,"Use redirect() from loaders and actions for navigation","The redirect() utility creates a Response with a Location header. Use it after successful mutations, auth checks, and conditional routing. It works in both loaders and actions.","Use redirect() with the target path; include status codes for permanent redirects; preserve return type","Do not use navigate() in loaders/actions; do not return json when a redirect is appropriate","// app/routes/posts.$id.edit.tsx
+import type { ActionFunctionArgs, LoaderFunctionArgs } from '@remix-run/node';
+import { json, redirect } from '@remix-run/node';
+import { requireUser } from '~/services/auth.server';
+
+export async function loader({ request, params }: LoaderFunctionArgs) {
+  const user = await requireUser(request);
+  const post = await db.post.findUnique({ where: { id: params.id } });
+  if (!post) throw new Response('Not Found', { status: 404 });
+  if (post.authorId !== user.id) {
+    return redirect(`/posts/${params.id}`); // Not authorized to edit
+  }
+  return json({ post });
+}
+
+export async function action({ request, params }: ActionFunctionArgs) {
+  const user = await requireUser(request);
+  const formData = await request.formData();
+  const title = formData.get('title') as string;
+  const content = formData.get('content') as string;
+
+  await db.post.update({
+    where: { id: params.id, authorId: user.id },
+    data: { title, content },
+  });
+
+  return redirect(`/posts/${params.id}`);
+}","// BAD: Returning data instead of redirecting after mutation
+export async function action({ request, params }: ActionFunctionArgs) {
+  const formData = await request.formData();
+  const post = await db.post.update({
+    where: { id: params.id },
+    data: Object.fromEntries(formData),
+  });
+  // Returns data instead of redirecting -- stale data, no URL change
+  return json({ success: true, post });
+}",warning,https://remix.run/docs/en/main/utils/redirect
+17,Response Helpers,"Use json, defer, and redirect response helpers consistently","Remix provides json(), defer(), and redirect() helpers that create proper Response objects with correct headers. Use them instead of constructing Response objects manually.","Use json() for data responses; defer() for streaming; redirect() for navigation; set appropriate status codes","Do not construct Response objects manually for common cases; do not forget status codes for errors","// app/routes/api.health.tsx
+import { json } from '@remix-run/node';
+import type { LoaderFunctionArgs } from '@remix-run/node';
+
+export async function loader({ request }: LoaderFunctionArgs) {
+  try {
+    await db.$queryRaw`SELECT 1`;
+    return json(
+      { status: 'healthy', timestamp: new Date().toISOString() },
+      { status: 200, headers: { 'Cache-Control': 'no-store' } }
+    );
+  } catch (error) {
+    return json(
+      { status: 'unhealthy', error: 'Database connection failed' },
+      { status: 503 }
+    );
+  }
+}
+
+// Using redirect with status
+export async function action({ request }: ActionFunctionArgs) {
+  // 301 for permanent redirect
+  return redirect('/new-location', { status: 301 });
+}","// BAD: Constructing Response manually
+export async function loader() {
+  const data = { status: 'ok' };
+  return new Response(JSON.stringify(data), {
+    status: 200,
+    headers: {
+      'Content-Type': 'application/json', // Easy to forget
+    },
+  });
+}",info,https://remix.run/docs/en/main/utils/json
+18,Streaming,"Use defer with Await and Suspense for streaming data","defer() allows you to stream data to the client, showing fallback UI while slow data loads. Use it for non-critical data that should not block the initial page render.","Use defer() for slow non-critical data; wrap Await in Suspense with a fallback; keep critical data non-deferred","Do not defer critical above-the-fold data; do not forget Suspense fallback boundaries","// app/routes/dashboard.tsx
+import type { LoaderFunctionArgs } from '@remix-run/node';
+import { defer } from '@remix-run/node';
+import { Await, useLoaderData } from '@remix-run/react';
+import { Suspense } from 'react';
+
+export async function loader({ request }: LoaderFunctionArgs) {
+  const user = await requireUser(request);
+  // Critical data -- awaited immediately
+  const profile = await getProfile(user.id);
+  // Non-critical data -- deferred (streamed later)
+  const analyticsPromise = getAnalytics(user.id);  // Note: no await
+  const notificationsPromise = getNotifications(user.id);  // Note: no await
+
+  return defer({
+    profile,
+    analytics: analyticsPromise,
+    notifications: notificationsPromise,
+  });
+}
+
+export default function Dashboard() {
+  const { profile, analytics, notifications } = useLoaderData<typeof loader>();
+  return (
+    <div>
+      <h1>Welcome, {profile.name}</h1>
+      <Suspense fallback={<div>Loading analytics...</div>}>
+        <Await resolve={analytics} errorElement={<p>Failed to load analytics</p>}>
+          {(data) => <AnalyticsChart data={data} />}
+        </Await>
+      </Suspense>
+      <Suspense fallback={<div>Loading notifications...</div>}>
+        <Await resolve={notifications}>
+          {(items) => <NotificationList items={items} />}
+        </Await>
+      </Suspense>
+    </div>
+  );
+}","// BAD: Awaiting all data -- slow data blocks the entire page
+export async function loader({ request }: LoaderFunctionArgs) {
+  const user = await requireUser(request);
+  const profile = await getProfile(user.id);
+  const analytics = await getAnalytics(user.id); // Slow! Blocks render
+  const notifications = await getNotifications(user.id); // Also slow!
+  return json({ profile, analytics, notifications });
+}",warning,https://remix.run/docs/en/main/utils/defer
+19,Meta,"Export meta function for page-level metadata","The meta function exports metadata (title, description, og tags) for each route. Remix merges meta from parent and child routes. Return an array of meta descriptor objects.","Export a meta function returning an array of descriptors; include title and description at minimum","Do not set document.title manually in useEffect; do not duplicate meta in every route if parent handles it","// app/routes/blog.$slug.tsx
+import type { MetaFunction, LoaderFunctionArgs } from '@remix-run/node';
+import { json } from '@remix-run/node';
+
+export async function loader({ params }: LoaderFunctionArgs) {
+  const post = await getPost(params.slug!);
+  if (!post) throw new Response('Not Found', { status: 404 });
+  return json({ post });
+}
+
+export const meta: MetaFunction<typeof loader> = ({ data }) => {
+  if (!data) {
+    return [
+      { title: 'Post Not Found' },
+      { name: 'description', content: 'The requested post could not be found.' },
+    ];
+  }
+  return [
+    { title: `${data.post.title} | My Blog` },
+    { name: 'description', content: data.post.excerpt },
+    { property: 'og:title', content: data.post.title },
+    { property: 'og:description', content: data.post.excerpt },
+    { property: 'og:image', content: data.post.coverImage },
+    { property: 'og:type', content: 'article' },
+    { name: 'twitter:card', content: 'summary_large_image' },
+  ];
+};","// BAD: Setting title with useEffect
+import { useEffect } from 'react';
+
+export default function BlogPost() {
+  const { post } = useLoaderData<typeof loader>();
+  useEffect(() => {
+    document.title = post.title; // Does not work for SSR or SEO
+  }, [post.title]);
+  return <article>{post.content}</article>;
+}",warning,https://remix.run/docs/en/main/route/meta
+20,Links,"Export links function for route-specific CSS and resources","The links function lets you add <link> tags for stylesheets, preloads, and other resources specific to a route. Remix automatically adds and removes them as users navigate.","Export a links function returning an array of link descriptors; use for route-scoped CSS","Do not import CSS globally when it is only needed by one route; do not use runtime style injection for static styles","// app/routes/dashboard.tsx
+import type { LinksFunction } from '@remix-run/node';
+import dashboardStyles from '~/styles/dashboard.css?url';
+import chartStyles from '~/styles/charts.css?url';
+
+export const links: LinksFunction = () => [
+  { rel: 'stylesheet', href: dashboardStyles },
+  { rel: 'stylesheet', href: chartStyles },
+  {
+    rel: 'preload',
+    href: '/fonts/inter-var.woff2',
+    as: 'font',
+    type: 'font/woff2',
+    crossOrigin: 'anonymous',
+  },
+];
+
+export default function Dashboard() {
+  return <div className=""dashboard"">Dashboard content</div>;
+}","// BAD: Importing all CSS globally in root.tsx
+// app/root.tsx
+import dashboardStyles from '~/styles/dashboard.css?url';
+import settingsStyles from '~/styles/settings.css?url';
+import profileStyles from '~/styles/profile.css?url';
+
+// All styles loaded on every page even if not needed
+export const links: LinksFunction = () => [
+  { rel: 'stylesheet', href: dashboardStyles },
+  { rel: 'stylesheet', href: settingsStyles },
+  { rel: 'stylesheet', href: profileStyles },
+];",info,https://remix.run/docs/en/main/route/links
+21,Resource Routes,"Use resource routes for non-UI responses like JSON APIs and files","Resource routes are routes that do not export a default component. They only export loader/action and return non-HTML responses like JSON, CSV, PDFs, or images.","Export only loader/action without a default component; set appropriate Content-Type headers","Do not export a default component from resource routes; do not forget Content-Type and Content-Disposition headers","// app/routes/api.reports.$id[.csv].tsx
+import type { LoaderFunctionArgs } from '@remix-run/node';
+import { requireUser } from '~/services/auth.server';
+
+export async function loader({ request, params }: LoaderFunctionArgs) {
+  const user = await requireUser(request);
+  const report = await getReport(params.id!, user.id);
+  if (!report) throw new Response('Not Found', { status: 404 });
+
+  const csvRows = [
+    ['Date', 'Category', 'Amount'].join(','),
+    ...report.entries.map(e =>
+      [e.date, e.category, e.amount].join(',')
+    ),
+  ];
+
+  return new Response(csvRows.join('\n'), {
+    status: 200,
+    headers: {
+      'Content-Type': 'text/csv',
+      'Content-Disposition': `attachment; filename=""report-${params.id}.csv""`,
+    },
+  });
+}
+
+// No default export -- this is a resource route
+
+// app/routes/api.users.tsx (JSON API)
+export async function loader({ request }: LoaderFunctionArgs) {
+  const users = await db.user.findMany({ select: { id: true, name: true } });
+  return json(users);
+}","// BAD: Resource route with unnecessary default export
+export async function loader() {
+  return json({ data: 'api response' });
+}
+
+// This makes Remix treat it as a UI route
+export default function ApiRoute() {
+  return null; // Renders an empty page on direct navigation
+}",info,https://remix.run/docs/en/main/guides/resource-routes
+22,Validation,"Use Zod schemas for form validation in action functions","Zod provides runtime type checking and parsing for form data in actions. Parse formData with Zod schemas and return structured errors that the UI can display per-field.","Define Zod schemas for all form inputs; use safeParse and return fieldErrors; reuse schemas for client validation","Do not validate manually with if statements; do not return unstructured error messages","// app/routes/settings.profile.tsx
+import type { ActionFunctionArgs } from '@remix-run/node';
+import { json, redirect } from '@remix-run/node';
+import { Form, useActionData } from '@remix-run/react';
+import { z } from 'zod';
+
+const ProfileSchema = z.object({
+  name: z.string().min(2, 'Name must be at least 2 characters'),
+  bio: z.string().max(500, 'Bio must be under 500 characters').optional(),
+  website: z.string().url('Must be a valid URL').optional().or(z.literal('')),
+  timezone: z.string().min(1, 'Please select a timezone'),
+});
+
+export async function action({ request }: ActionFunctionArgs) {
+  const user = await requireUser(request);
+  const formData = await request.formData();
+  const rawData = Object.fromEntries(formData);
+
+  const result = ProfileSchema.safeParse(rawData);
+  if (!result.success) {
+    return json(
+      { errors: result.error.flatten().fieldErrors, values: rawData },
+      { status: 400 }
+    );
+  }
+
+  await db.user.update({ where: { id: user.id }, data: result.data });
+  return redirect('/settings/profile');
+}
+
+export default function ProfileSettings() {
+  const actionData = useActionData<typeof action>();
+  return (
+    <Form method=""post"">
+      <label>
+        Name
+        <input name=""name"" defaultValue={actionData?.values?.name as string} />
+        {actionData?.errors?.name && <span className=""error"">{actionData.errors.name[0]}</span>}
+      </label>
+      <button type=""submit"">Save</button>
+    </Form>
+  );
+}","// BAD: Manual validation with inconsistent error handling
+export async function action({ request }: ActionFunctionArgs) {
+  const formData = await request.formData();
+  const name = formData.get('name') as string;
+  const website = formData.get('website') as string;
+
+  if (!name) return json({ error: 'Name is required' }); // No field mapping
+  if (name.length < 2) return json({ error: 'Name too short' }); // Can only show one error
+  if (website && !website.startsWith('http')) {
+    return json({ error: 'Bad website' }); // Inconsistent messages
+  }
+  // Easy to forget validations for new fields
+  await db.user.update({ where: { id: user.id }, data: { name, website } });
+}",warning,https://remix.run/docs/en/main/route/action
+23,Optimistic UI,"Use useFetcher with optimistic updates for instant feedback","Combine useFetcher with optimistic state to show changes immediately while the server processes the request. Read fetcher.formData to determine the optimistic state.","Use fetcher.formData to derive optimistic values; revert on error; keep the pattern simple","Do not wait for server response to update UI for simple toggles; do not forget error handling for failed optimistic updates","// app/components/TodoItem.tsx
+import { useFetcher } from '@remix-run/react';
+
+interface TodoItemProps {
+  id: string;
+  title: string;
+  completed: boolean;
+}
+
+export function TodoItem({ id, title, completed }: TodoItemProps) {
+  const fetcher = useFetcher();
+
+  // Optimistic state: if submitting, use the form value; otherwise use the prop
+  const optimisticCompleted = fetcher.formData
+    ? fetcher.formData.get('completed') === 'true'
+    : completed;
+
+  const optimisticTitle = fetcher.formData
+    ? (fetcher.formData.get('title') as string)
+    : title;
+
+  return (
+    <li className={optimisticCompleted ? 'completed' : ''}>
+      <fetcher.Form method=""post"" action={`/todos/${id}`}>
+        <input type=""hidden"" name=""completed"" value={String(!optimisticCompleted)} />
+        <button
+          type=""submit""
+          name=""intent""
+          value=""toggle""
+          className=""toggle""
+        >
+          {optimisticCompleted ? 'Completed' : 'Pending'}
+        </button>
+      </fetcher.Form>
+      <span style={{ opacity: fetcher.state !== 'idle' ? 0.6 : 1 }}>
+        {optimisticTitle}
+      </span>
+      {fetcher.state === 'idle' && fetcher.data?.error && (
+        <span className=""error"">Failed to update</span>
+      )}
+    </li>
+  );
+}","// BAD: Waiting for server response before updating UI
+export function TodoItem({ id, title, completed }: TodoItemProps) {
+  const fetcher = useFetcher();
+
+  // No optimistic update -- UI is stale until server responds
+  return (
+    <li className={completed ? 'completed' : ''}>
+      <fetcher.Form method=""post"" action={`/todos/${id}`}>
+        <button type=""submit"" disabled={fetcher.state !== 'idle'}>
+          {fetcher.state !== 'idle' ? 'Saving...' : completed ? 'Done' : 'Todo'}
+        </button>
+      </fetcher.Form>
+    </li>
+  );
+}",info,https://remix.run/docs/en/main/discussion/pending-ui
+24,File Uploads,"Use unstable_parseMultipartFormData for file upload handling","Remix provides unstable_parseMultipartFormData for handling file uploads on the server. Combine it with an upload handler that saves files to disk, S3, or another storage provider.","Use unstable_parseMultipartFormData with a custom upload handler; validate file type and size; use .server.ts files","Do not parse multipart forms manually; do not skip file type validation; do not store uploads in the public directory without validation","// app/routes/uploads.tsx
+import type { ActionFunctionArgs } from '@remix-run/node';
+import {
+  json,
+  redirect,
+  unstable_parseMultipartFormData,
+  unstable_createMemoryUploadHandler,
+  unstable_composeUploadHandlers,
+} from '@remix-run/node';
+import { Form, useActionData } from '@remix-run/react';
+import { uploadToS3 } from '~/services/s3.server';
+
+const MAX_FILE_SIZE = 5 * 1024 * 1024; // 5MB
+const ALLOWED_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
+
+export async function action({ request }: ActionFunctionArgs) {
+  const user = await requireUser(request);
+
+  const uploadHandler = unstable_composeUploadHandlers(
+    async ({ name, contentType, data, filename }) => {
+      if (name !== 'avatar') return undefined;
+      if (!ALLOWED_TYPES.includes(contentType)) {
+        throw new Error('Invalid file type');
+      }
+      const chunks: Uint8Array[] = [];
+      for await (const chunk of data) {
+        chunks.push(chunk);
+      }
+      const buffer = Buffer.concat(chunks);
+      if (buffer.length > MAX_FILE_SIZE) {
+        throw new Error('File too large');
+      }
+      const url = await uploadToS3(buffer, filename!, contentType);
+      return url;
+    },
+    unstable_createMemoryUploadHandler()
+  );
+
+  try {
+    const formData = await unstable_parseMultipartFormData(request, uploadHandler);
+    const avatarUrl = formData.get('avatar') as string;
+    await db.user.update({ where: { id: user.id }, data: { avatarUrl } });
+    return redirect('/settings/profile');
+  } catch (error) {
+    return json({ error: (error as Error).message }, { status: 400 });
+  }
+}
+
+export default function UploadAvatar() {
+  const actionData = useActionData<typeof action>();
+  return (
+    <Form method=""post"" encType=""multipart/form-data"">
+      <input type=""file"" name=""avatar"" accept=""image/*"" required />
+      {actionData?.error && <p className=""error"">{actionData.error}</p>}
+      <button type=""submit"">Upload</button>
+    </Form>
+  );
+}","// BAD: No file validation, storing files without checks
+export async function action({ request }: ActionFunctionArgs) {
+  const formData = await unstable_parseMultipartFormData(
+    request,
+    unstable_createMemoryUploadHandler({ maxPartSize: Infinity }) // No size limit!
+  );
+  const file = formData.get('avatar') as File;
+  // No type checking -- user could upload .exe
+  // No size checking -- could crash the server
+  const buffer = Buffer.from(await file.arrayBuffer());
+  fs.writeFileSync(`./public/uploads/${file.name}`, buffer); // Path traversal risk!
+}",warning,https://remix.run/docs/en/main/utils/unstable-parse-multipart-form-data
+25,Deployment,"Configure Remix for production deployment with the appropriate adapter","Remix supports multiple deployment targets via adapters. Choose the right adapter for your platform and configure entry.server.tsx for production optimizations.","Use the correct adapter package; configure entry.server.tsx for streaming; set proper environment variables","Do not use the development server in production; do not skip compression and caching headers","// server.ts (Express adapter example)
+import { createRequestHandler } from '@remix-run/express';
+import express from 'express';
+import compression from 'compression';
+import morgan from 'morgan';
+
+const app = express();
+
+app.use(compression());
+app.use(morgan('tiny'));
+
+// Serve static assets with long-lived cache
+app.use(
+  '/build',
+  express.static('public/build', {
+    immutable: true,
+    maxAge: '1y',
+  })
+);
+
+// Serve other static assets with shorter cache
+app.use(express.static('public', { maxAge: '1h' }));
+
+const MODE = process.env.NODE_ENV;
+
+app.all(
+  '*',
+  createRequestHandler({
+    build: await import('./build/server/index.js'),
+    mode: MODE,
+  })
+);
+
+const port = process.env.PORT || 3000;
+app.listen(port, () => {
+  console.log(`Express server running on port ${port}`);
+});
+
+// Dockerfile example for Fly.io
+// FROM node:20-slim AS base
+// WORKDIR /app
+// COPY package*.json ./
+// RUN npm ci --only=production
+// COPY build ./build
+// COPY public ./public
+// EXPOSE 3000
+// CMD [""node"", ""server.js""]","// BAD: Using remix dev server in production
+// package.json
+// {
+//   ""scripts"": {
+//     ""start"": ""remix dev""  // WRONG: dev server in production!
+//   }
+// }
+
+// BAD: No static asset caching
+const app = express();
+app.use(express.static('public')); // No cache headers!
+app.all('*', createRequestHandler({ build })); // No compression!",error,https://remix.run/docs/en/main/guides/deployment

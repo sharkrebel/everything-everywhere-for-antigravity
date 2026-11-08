@@ -1,0 +1,27 @@
+{
+    "platform": "claude",
+    "name": "NodeSkill",
+    "version": "1.0.0",
+    "description": "AI-powered Node.js/TypeScript intelligence toolkit for Claude Code",
+    "install_path": ".claude/skills/nodeskill",
+    "config_file": "CLAUDE.md",
+    "search_command": "python3 src/nodeskill/scripts/search.py",
+
+    "features": {
+        "domain_search": true,
+        "stack_search": true,
+        "auto_detect": true
+    },
+
+    "domains": [
+        "pattern", "package", "error", "perf", "test",
+        "async", "typescript", "arch", "idiom", "anti",
+        "tooling", "module"
+    ],
+
+    "stacks": [
+        "web-express", "web-fastify", "web-nestjs", "web-hono",
+        "web-nextjs", "web-remix", "orm-prisma", "orm-drizzle",
+        "graphql", "database", "auth", "realtime"
+    ]
+}

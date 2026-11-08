@@ -1,0 +1,1324 @@
+No,Category,Guideline,Description,Do,Dont,Code Good,Code Bad,Severity,Docs URL
+1,Password Hashing,Use bcrypt or argon2 for password hashing,"Hash passwords with a strong adaptive algorithm before storing them. bcrypt and argon2 automatically handle salting and are resistant to brute-force attacks.",Use bcrypt.hash() with a cost factor of at least 10 or argon2 for new projects,Store passwords in plain text or use MD5/SHA for password hashing,"import bcrypt from 'bcrypt';
+
+const SALT_ROUNDS = 12;
+
+export async function hashPassword(plain: string): Promise<string> {
+  return bcrypt.hash(plain, SALT_ROUNDS);
+}
+
+export async function verifyPassword(plain: string, hashed: string): Promise<boolean> {
+  return bcrypt.compare(plain, hashed);
+}
+
+// Usage in registration
+app.post('/register', async (req, res) => {
+  const { email, password } = req.body;
+  const hashedPassword = await hashPassword(password);
+  await db.user.create({ data: { email, password: hashedPassword } });
+  res.status(201).json({ message: 'User created' });
+});","import crypto from 'crypto';
+
+// BAD: Using MD5 for passwords - easily cracked
+function hashPassword(plain: string): string {
+  return crypto.createHash('md5').update(plain).digest('hex');
+}
+
+// BAD: Storing plain text
+app.post('/register', async (req, res) => {
+  const { email, password } = req.body;
+  await db.user.create({ data: { email, password } }); // plain text!
+  res.status(201).json({ message: 'User created' });
+});",error,https://www.npmjs.com/package/bcrypt
+2,JWT Creation,Sign JWTs with proper payload and expiration,"Create JSON Web Tokens with minimal payload data and a short expiration time. Include only necessary claims and always set an expiry.",Include only essential claims (sub and role) and set a short expiresIn,Put sensitive data like passwords or full user objects in the JWT payload,"import jwt from 'jsonwebtoken';
+
+interface TokenPayload {
+  sub: string;
+  role: string;
+}
+
+const JWT_SECRET = process.env.JWT_SECRET!;
+const JWT_EXPIRES_IN = '15m';
+
+export function createAccessToken(userId: string, role: string): string {
+  const payload: TokenPayload = { sub: userId, role };
+  return jwt.sign(payload, JWT_SECRET, {
+    expiresIn: JWT_EXPIRES_IN,
+    issuer: 'myapp',
+    audience: 'myapp-client',
+  });
+}
+
+app.post('/login', async (req, res) => {
+  const user = await authenticateUser(req.body);
+  const token = createAccessToken(user.id, user.role);
+  res.json({ accessToken: token });
+});","import jwt from 'jsonwebtoken';
+
+// BAD: Sensitive data in payload, no expiration
+function createToken(user: any): string {
+  return jwt.sign(
+    {
+      id: user.id,
+      email: user.email,
+      password: user.password, // NEVER include password
+      creditCard: user.creditCard, // NEVER include sensitive data
+    },
+    'hardcoded-secret' // NEVER hardcode secrets
+    // No expiresIn - token never expires!
+  );
+}",error,https://www.npmjs.com/package/jsonwebtoken
+3,JWT Verification,Verify JWTs in middleware with proper error handling,"Create reusable middleware that verifies JWT tokens from the Authorization header. Handle expired and invalid tokens with appropriate HTTP status codes.",Use middleware that extracts the Bearer token and verifies with proper error handling,Catch all errors silently or skip verification on certain routes without intent,"import jwt from 'jsonwebtoken';
+import { Request, Response, NextFunction } from 'express';
+
+interface AuthRequest extends Request {
+  user?: { sub: string; role: string };
+}
+
+const JWT_SECRET = process.env.JWT_SECRET!;
+
+export function authenticateToken(req: AuthRequest, res: Response, next: NextFunction): void {
+  const authHeader = req.headers.authorization;
+  const token = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : null;
+
+  if (!token) {
+    res.status(401).json({ error: 'Authentication required' });
+    return;
+  }
+
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET, {
+      issuer: 'myapp',
+      audience: 'myapp-client',
+    }) as { sub: string; role: string };
+    req.user = decoded;
+    next();
+  } catch (err) {
+    if (err instanceof jwt.TokenExpiredError) {
+      res.status(401).json({ error: 'Token expired' });
+    } else {
+      res.status(403).json({ error: 'Invalid token' });
+    }
+  }
+}
+
+app.get('/profile', authenticateToken, (req: AuthRequest, res) => {
+  res.json({ userId: req.user!.sub });
+});","import jwt from 'jsonwebtoken';
+
+// BAD: No proper error handling, no type safety
+function authMiddleware(req: any, res: any, next: any) {
+  const token = req.headers['authorization']; // Doesn't strip 'Bearer '
+  try {
+    const decoded = jwt.verify(token, 'secret');
+    req.user = decoded;
+    next();
+  } catch (e) {
+    next(); // BAD: Continues even on verification failure!
+  }
+}",error,https://www.npmjs.com/package/jsonwebtoken
+4,JWT Refresh Tokens,Implement access and refresh token rotation,"Use short-lived access tokens paired with long-lived refresh tokens stored securely. Rotate refresh tokens on each use to detect token theft.",Issue short-lived access tokens (15m) and rotate refresh tokens on each refresh request,Use a single long-lived token or store refresh tokens in localStorage,"import jwt from 'jsonwebtoken';
+import { randomBytes } from 'crypto';
+
+const ACCESS_SECRET = process.env.ACCESS_SECRET!;
+const REFRESH_SECRET = process.env.REFRESH_SECRET!;
+
+function generateTokenPair(userId: string, role: string) {
+  const accessToken = jwt.sign({ sub: userId, role }, ACCESS_SECRET, { expiresIn: '15m' });
+  const refreshToken = jwt.sign({ sub: userId, tokenId: randomBytes(16).toString('hex') }, REFRESH_SECRET, { expiresIn: '7d' });
+  return { accessToken, refreshToken };
+}
+
+app.post('/auth/refresh', async (req, res) => {
+  const { refreshToken } = req.body;
+  if (!refreshToken) {
+    return res.status(401).json({ error: 'Refresh token required' });
+  }
+
+  try {
+    const decoded = jwt.verify(refreshToken, REFRESH_SECRET) as { sub: string; tokenId: string };
+    const storedToken = await db.refreshToken.findUnique({ where: { tokenId: decoded.tokenId } });
+
+    if (!storedToken || storedToken.revoked) {
+      await db.refreshToken.updateMany({ where: { userId: decoded.sub }, data: { revoked: true } });
+      return res.status(403).json({ error: 'Token reuse detected' });
+    }
+
+    await db.refreshToken.update({ where: { tokenId: decoded.tokenId }, data: { revoked: true } });
+    const user = await db.user.findUnique({ where: { id: decoded.sub } });
+    const tokens = generateTokenPair(user!.id, user!.role);
+    await db.refreshToken.create({ data: { tokenId: tokens.refreshToken, userId: user!.id } });
+
+    res.json(tokens);
+  } catch {
+    res.status(403).json({ error: 'Invalid refresh token' });
+  }
+});","import jwt from 'jsonwebtoken';
+
+// BAD: Single long-lived token, no refresh mechanism
+function createToken(userId: string): string {
+  return jwt.sign({ sub: userId }, 'secret', {
+    expiresIn: '365d', // BAD: Token valid for a year
+  });
+}
+
+// BAD: Storing tokens in localStorage on client
+// localStorage.setItem('token', response.accessToken);
+// BAD: No token rotation - same refresh token reused forever
+app.post('/refresh', async (req, res) => {
+  const decoded = jwt.verify(req.body.token, 'secret') as any;
+  const newAccess = jwt.sign({ sub: decoded.sub }, 'secret', { expiresIn: '365d' });
+  res.json({ accessToken: newAccess }); // No new refresh token
+});",error,https://auth0.com/blog/refresh-tokens-what-are-they-and-when-to-use-them/
+5,OAuth 2.0 Flow,Implement authorization code grant correctly,"Use the authorization code grant flow for server-side apps. Exchange the code for tokens on the server side and validate the state parameter to prevent CSRF.",Exchange authorization codes server-side and validate the state parameter,Exchange codes client-side or skip state validation,"import express from 'express';
+import axios from 'axios';
+import { randomBytes } from 'crypto';
+
+const app = express();
+const CLIENT_ID = process.env.OAUTH_CLIENT_ID!;
+const CLIENT_SECRET = process.env.OAUTH_CLIENT_SECRET!;
+const REDIRECT_URI = 'http://localhost:3000/auth/callback';
+
+app.get('/auth/login', (req, res) => {
+  const state = randomBytes(32).toString('hex');
+  req.session!.oauthState = state;
+
+  const authUrl = new URL('https://provider.com/oauth/authorize');
+  authUrl.searchParams.set('client_id', CLIENT_ID);
+  authUrl.searchParams.set('redirect_uri', REDIRECT_URI);
+  authUrl.searchParams.set('response_type', 'code');
+  authUrl.searchParams.set('scope', 'openid profile email');
+  authUrl.searchParams.set('state', state);
+
+  res.redirect(authUrl.toString());
+});
+
+app.get('/auth/callback', async (req, res) => {
+  const { code, state } = req.query;
+
+  if (state !== req.session!.oauthState) {
+    return res.status(403).json({ error: 'Invalid state parameter' });
+  }
+  delete req.session!.oauthState;
+
+  const tokenResponse = await axios.post('https://provider.com/oauth/token', {
+    grant_type: 'authorization_code',
+    code,
+    redirect_uri: REDIRECT_URI,
+    client_id: CLIENT_ID,
+    client_secret: CLIENT_SECRET,
+  });
+
+  const { access_token, id_token } = tokenResponse.data;
+  const userInfo = await axios.get('https://provider.com/userinfo', {
+    headers: { Authorization: `Bearer ${access_token}` },
+  });
+
+  req.session!.user = userInfo.data;
+  res.redirect('/dashboard');
+});","// BAD: Using implicit flow, no state validation
+app.get('/auth/login', (req, res) => {
+  // BAD: response_type=token exposes token in URL fragment
+  res.redirect(
+    'https://provider.com/oauth/authorize?client_id=abc&response_type=token&redirect_uri=http://localhost:3000/callback'
+    // No state parameter - CSRF vulnerable!
+  );
+});
+
+app.get('/auth/callback', async (req, res) => {
+  // BAD: No state validation
+  const { code } = req.query;
+  // BAD: Exchanging token on client side exposes client_secret
+  res.send(`<script>fetch('/exchange?code=${code}')</script>`);
+});",error,https://oauth.net/2/
+6,Passport Local Strategy,Configure passport-local for username/password auth,"Set up Passport.js with the local strategy for traditional username and password authentication. Use async/await and proper error messages.",Use async verify callback with bcrypt comparison and descriptive error messages,Return detailed error messages that reveal whether the username or password was wrong,"import passport from 'passport';
+import { Strategy as LocalStrategy } from 'passport-local';
+import bcrypt from 'bcrypt';
+
+passport.use(
+  new LocalStrategy(
+    { usernameField: 'email', passwordField: 'password' },
+    async (email, password, done) => {
+      try {
+        const user = await db.user.findUnique({ where: { email } });
+
+        if (!user) {
+          return done(null, false, { message: 'Invalid email or password' });
+        }
+
+        const isValid = await bcrypt.compare(password, user.password);
+        if (!isValid) {
+          return done(null, false, { message: 'Invalid email or password' });
+        }
+
+        return done(null, { id: user.id, email: user.email, role: user.role });
+      } catch (err) {
+        return done(err);
+      }
+    }
+  )
+);
+
+passport.serializeUser((user: any, done) => done(null, user.id));
+passport.deserializeUser(async (id: string, done) => {
+  try {
+    const user = await db.user.findUnique({ where: { id } });
+    done(null, user);
+  } catch (err) {
+    done(err);
+  }
+});
+
+app.post('/login', passport.authenticate('local', {
+  successRedirect: '/dashboard',
+  failureRedirect: '/login',
+  failureMessage: true,
+}));","import passport from 'passport';
+import { Strategy as LocalStrategy } from 'passport-local';
+
+// BAD: Synchronous, reveals which field failed, no hashing check
+passport.use(
+  new LocalStrategy((username, password, done) => {
+    const user = users.find((u) => u.username === username);
+    if (!user) {
+      return done(null, false, { message: 'Username not found' }); // BAD: reveals username doesn't exist
+    }
+    if (user.password !== password) { // BAD: plain text comparison
+      return done(null, false, { message: 'Wrong password' }); // BAD: reveals password is wrong
+    }
+    return done(null, user); // BAD: returns full user object with password
+  })
+);",warning,https://www.passportjs.org/packages/passport-local/
+7,Passport JWT Strategy,Configure passport-jwt for token-based auth,"Set up Passport.js with the JWT strategy to protect API routes. Extract tokens from the Authorization header and validate claims.",Extract tokens from Authorization Bearer header and validate issuer/audience,Extract tokens from query parameters or skip claim validation,"import passport from 'passport';
+import { Strategy as JwtStrategy, ExtractJwt, StrategyOptionsWithoutRequest } from 'passport-jwt';
+
+const jwtOptions: StrategyOptionsWithoutRequest = {
+  jwtFromRequest: ExtractJwt.fromAuthHeaderAsBearerToken(),
+  secretOrKey: process.env.JWT_SECRET!,
+  issuer: 'myapp',
+  audience: 'myapp-client',
+};
+
+passport.use(
+  new JwtStrategy(jwtOptions, async (payload, done) => {
+    try {
+      const user = await db.user.findUnique({
+        where: { id: payload.sub },
+        select: { id: true, email: true, role: true },
+      });
+
+      if (!user) {
+        return done(null, false);
+      }
+
+      return done(null, user);
+    } catch (err) {
+      return done(err, false);
+    }
+  })
+);
+
+// Protect routes
+app.get(
+  '/api/profile',
+  passport.authenticate('jwt', { session: false }),
+  (req, res) => {
+    res.json(req.user);
+  }
+);","import passport from 'passport';
+import { Strategy as JwtStrategy, ExtractJwt } from 'passport-jwt';
+
+// BAD: Token from query string, no claim validation
+passport.use(
+  new JwtStrategy(
+    {
+      jwtFromRequest: ExtractJwt.fromUrlQueryParameter('token'), // BAD: token in URL is logged
+      secretOrKey: 'hardcoded-secret', // BAD: hardcoded
+      // No issuer/audience validation
+    },
+    (payload: any, done: any) => {
+      done(null, payload); // BAD: trusts payload directly without DB lookup
+    }
+  )
+);",warning,https://www.passportjs.org/packages/passport-jwt/
+8,Passport Google Strategy,Configure Google OAuth2 strategy,"Set up Passport.js with Google OAuth2 for social login. Handle user creation on first login and link accounts for returning users.",Find or create users on OAuth callback and store provider ID for account linking,Create duplicate accounts for the same email from different OAuth providers,"import passport from 'passport';
+import { Strategy as GoogleStrategy, Profile } from 'passport-google-oauth20';
+
+passport.use(
+  new GoogleStrategy(
+    {
+      clientID: process.env.GOOGLE_CLIENT_ID!,
+      clientSecret: process.env.GOOGLE_CLIENT_SECRET!,
+      callbackURL: '/auth/google/callback',
+      scope: ['profile', 'email'],
+    },
+    async (accessToken, refreshToken, profile: Profile, done) => {
+      try {
+        const email = profile.emails?.[0]?.value;
+        if (!email) {
+          return done(new Error('No email provided by Google'));
+        }
+
+        let user = await db.user.findUnique({ where: { email } });
+
+        if (user) {
+          if (!user.googleId) {
+            user = await db.user.update({
+              where: { id: user.id },
+              data: { googleId: profile.id },
+            });
+          }
+        } else {
+          user = await db.user.create({
+            data: {
+              email,
+              name: profile.displayName,
+              googleId: profile.id,
+              avatar: profile.photos?.[0]?.value,
+            },
+          });
+        }
+
+        return done(null, user);
+      } catch (err) {
+        return done(err as Error);
+      }
+    }
+  )
+);
+
+app.get('/auth/google', passport.authenticate('google', { scope: ['profile', 'email'] }));
+app.get('/auth/google/callback', passport.authenticate('google', { failureRedirect: '/login' }), (req, res) => {
+  res.redirect('/dashboard');
+});","import passport from 'passport';
+import { Strategy as GoogleStrategy } from 'passport-google-oauth20';
+
+// BAD: No account linking, no error handling
+passport.use(
+  new GoogleStrategy(
+    {
+      clientID: 'hardcoded-id',
+      clientSecret: 'hardcoded-secret',
+      callbackURL: '/auth/google/callback',
+    },
+    async (accessToken, refreshToken, profile, done) => {
+      // BAD: Always creates new user - duplicates if email exists
+      const user = await db.user.create({
+        data: {
+          email: profile.emails![0].value, // BAD: no null check
+          name: profile.displayName,
+        },
+      });
+      done(null, user);
+    }
+  )
+);",warning,https://www.passportjs.org/packages/passport-google-oauth20/
+9,NextAuth Setup,Configure NextAuth.js route handler in App Router,"Set up NextAuth.js in a Next.js App Router project with the [...nextauth] catch-all route. Export GET and POST handlers from the route file.",Create route.ts in app/api/auth/[...nextauth]/ and export named GET and POST handlers,Mix Pages Router and App Router patterns or export a default handler,"// app/api/auth/[...nextauth]/route.ts
+import NextAuth from 'next-auth';
+import type { NextAuthOptions } from 'next-auth';
+import GoogleProvider from 'next-auth/providers/google';
+import { PrismaAdapter } from '@auth/prisma-adapter';
+import { prisma } from '@/lib/prisma';
+
+export const authOptions: NextAuthOptions = {
+  adapter: PrismaAdapter(prisma),
+  providers: [
+    GoogleProvider({
+      clientId: process.env.GOOGLE_CLIENT_ID!,
+      clientSecret: process.env.GOOGLE_CLIENT_SECRET!,
+    }),
+  ],
+  session: {
+    strategy: 'jwt',
+    maxAge: 30 * 24 * 60 * 60, // 30 days
+  },
+  pages: {
+    signIn: '/login',
+    error: '/auth/error',
+  },
+  secret: process.env.NEXTAUTH_SECRET,
+};
+
+const handler = NextAuth(authOptions);
+export { handler as GET, handler as POST };","// BAD: Wrong file path or Pages Router pattern in App Router
+// pages/api/auth/[...nextauth].ts  <-- wrong for App Router
+import NextAuth from 'next-auth';
+
+// BAD: Default export doesn't work in App Router
+export default NextAuth({
+  providers: [],
+  // No adapter, no session config, no secret
+});
+
+// BAD: Missing NEXTAUTH_SECRET
+// BAD: No custom pages defined
+// BAD: No session strategy specified",warning,https://next-auth.js.org/getting-started/example
+10,NextAuth Providers,Configure multiple NextAuth providers,"Set up multiple authentication providers including OAuth and credentials. Each provider should be properly typed and configured with required scopes.",Configure each provider with explicit scopes and proper credential validation,Use the Credentials provider without proper validation or rate limiting,"import NextAuth from 'next-auth';
+import GoogleProvider from 'next-auth/providers/google';
+import GitHubProvider from 'next-auth/providers/github';
+import CredentialsProvider from 'next-auth/providers/credentials';
+import bcrypt from 'bcrypt';
+import { prisma } from '@/lib/prisma';
+
+export const authOptions = {
+  providers: [
+    GoogleProvider({
+      clientId: process.env.GOOGLE_CLIENT_ID!,
+      clientSecret: process.env.GOOGLE_CLIENT_SECRET!,
+      authorization: { params: { scope: 'openid profile email' } },
+    }),
+    GitHubProvider({
+      clientId: process.env.GITHUB_CLIENT_ID!,
+      clientSecret: process.env.GITHUB_CLIENT_SECRET!,
+    }),
+    CredentialsProvider({
+      name: 'credentials',
+      credentials: {
+        email: { label: 'Email', type: 'email' },
+        password: { label: 'Password', type: 'password' },
+      },
+      async authorize(credentials) {
+        if (!credentials?.email || !credentials?.password) {
+          throw new Error('Email and password required');
+        }
+
+        const user = await prisma.user.findUnique({ where: { email: credentials.email } });
+        if (!user || !user.password) {
+          throw new Error('Invalid credentials');
+        }
+
+        const isValid = await bcrypt.compare(credentials.password, user.password);
+        if (!isValid) {
+          throw new Error('Invalid credentials');
+        }
+
+        return { id: user.id, email: user.email, name: user.name };
+      },
+    }),
+  ],
+};","import CredentialsProvider from 'next-auth/providers/credentials';
+
+// BAD: No validation, returns arbitrary data
+export const authOptions = {
+  providers: [
+    CredentialsProvider({
+      name: 'credentials',
+      credentials: {
+        email: {},
+        password: {},
+      },
+      async authorize(credentials) {
+        // BAD: No null check on credentials
+        const user = await db.user.findUnique({ where: { email: credentials!.email } });
+        if (user!.password === credentials!.password) { // BAD: plain text comparison
+          return user; // BAD: returns full user including password hash
+        }
+        return null;
+      },
+    }),
+  ],
+};",error,https://next-auth.js.org/providers/
+11,NextAuth Callbacks,Implement session and JWT callbacks for custom claims,"Use NextAuth callbacks to add custom data (like roles) to the JWT token and session object. Keep the callbacks typed and minimal.",Add only necessary data to tokens in the jwt callback and expose it via the session callback,Fetch heavy data in every callback invocation or skip type augmentation,"import NextAuth from 'next-auth';
+import type { NextAuthOptions } from 'next-auth';
+
+declare module 'next-auth' {
+  interface Session {
+    user: {
+      id: string;
+      email: string;
+      name: string;
+      role: string;
+    };
+  }
+}
+
+declare module 'next-auth/jwt' {
+  interface JWT {
+    role: string;
+    userId: string;
+  }
+}
+
+export const authOptions: NextAuthOptions = {
+  callbacks: {
+    async jwt({ token, user, trigger, session }) {
+      if (user) {
+        token.userId = user.id;
+        const dbUser = await prisma.user.findUnique({
+          where: { id: user.id },
+          select: { role: true },
+        });
+        token.role = dbUser?.role ?? 'user';
+      }
+      if (trigger === 'update' && session?.role) {
+        token.role = session.role;
+      }
+      return token;
+    },
+    async session({ session, token }) {
+      session.user.id = token.userId;
+      session.user.role = token.role;
+      return session;
+    },
+  },
+};","import NextAuth from 'next-auth';
+
+// BAD: No type augmentation, heavy DB queries in every call
+export const authOptions = {
+  callbacks: {
+    async jwt({ token, user }: any) {
+      // BAD: Full DB query on every request
+      const dbUser = await prisma.user.findUnique({
+        where: { email: token.email },
+        include: { posts: true, comments: true, orders: true }, // BAD: loading unnecessary data
+      });
+      token.fullUser = dbUser; // BAD: entire user object in token
+      return token;
+    },
+    async session({ session, token }: any) {
+      session.user = token.fullUser; // BAD: exposes everything to client
+      return session;
+    },
+  },
+};",warning,https://next-auth.js.org/configuration/callbacks
+12,Lucia Auth Setup,Configure Lucia for session-based authentication,"Set up Lucia auth library for type-safe session-based authentication. Lucia provides a simple API for creating and validating sessions without JWTs.",Use Lucia with a database adapter and configure session cookie attributes properly,Roll your own session management without proper cookie security,"import { Lucia } from 'lucia';
+import { PrismaAdapter } from '@lucia-auth/adapter-prisma';
+import { prisma } from './prisma';
+import type { User as DatabaseUser } from '@prisma/client';
+
+const adapter = new PrismaAdapter(prisma.session, prisma.user);
+
+export const lucia = new Lucia(adapter, {
+  sessionCookie: {
+    attributes: {
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'lax',
+    },
+  },
+  getUserAttributes: (attributes) => {
+    return {
+      email: attributes.email,
+      name: attributes.name,
+    };
+  },
+});
+
+declare module 'lucia' {
+  interface Register {
+    Lucia: typeof lucia;
+    DatabaseUserAttributes: Omit<DatabaseUser, 'id'>;
+  }
+}
+
+// Middleware to validate sessions
+export async function validateRequest(req: Request) {
+  const sessionId = lucia.readSessionCookie(req.headers.get('cookie') ?? '');
+  if (!sessionId) return { user: null, session: null };
+
+  const result = await lucia.validateSession(sessionId);
+  return result;
+}","// BAD: Manual session management without proper security
+import crypto from 'crypto';
+
+const sessions = new Map<string, any>(); // BAD: in-memory storage
+
+function createSession(userId: string) {
+  const sessionId = crypto.randomBytes(16).toString('hex');
+  sessions.set(sessionId, { userId, createdAt: Date.now() });
+  return sessionId;
+}
+
+app.post('/login', (req, res) => {
+  const sessionId = createSession(req.body.userId);
+  res.cookie('session', sessionId); // BAD: no httpOnly, secure, sameSite
+  res.json({ ok: true });
+});",warning,https://lucia-auth.com/
+13,Session Management,Implement secure cookie-based sessions,"Use express-session with secure cookie settings. Always configure httpOnly, secure, and sameSite attributes for session cookies.",Use express-session with a production-ready store and secure cookie defaults,Use default in-memory session store in production or insecure cookie settings,"import express from 'express';
+import session from 'express-session';
+import RedisStore from 'connect-redis';
+import { createClient } from 'redis';
+
+const redisClient = createClient({ url: process.env.REDIS_URL });
+redisClient.connect();
+
+const app = express();
+
+app.use(
+  session({
+    store: new RedisStore({ client: redisClient }),
+    secret: process.env.SESSION_SECRET!,
+    resave: false,
+    saveUninitialized: false,
+    name: '__Host-sid',
+    cookie: {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'lax',
+      maxAge: 24 * 60 * 60 * 1000, // 24 hours
+      domain: process.env.COOKIE_DOMAIN,
+    },
+  })
+);
+
+app.post('/login', async (req, res) => {
+  const user = await authenticateUser(req.body);
+  req.session.userId = user.id;
+  req.session.role = user.role;
+  res.json({ message: 'Logged in' });
+});
+
+app.post('/logout', (req, res) => {
+  req.session.destroy((err) => {
+    if (err) return res.status(500).json({ error: 'Logout failed' });
+    res.clearCookie('__Host-sid');
+    res.json({ message: 'Logged out' });
+  });
+});","import express from 'express';
+import session from 'express-session';
+
+const app = express();
+
+// BAD: Default memory store, insecure cookies
+app.use(
+  session({
+    secret: 'keyboard cat', // BAD: weak secret
+    resave: true, // BAD: unnecessary resaves
+    saveUninitialized: true, // BAD: creates sessions for anonymous users
+    // BAD: No store configured - uses MemoryStore (leaks memory)
+    cookie: {
+      // BAD: no httpOnly, secure, or sameSite
+      maxAge: 365 * 24 * 60 * 60 * 1000, // BAD: 1 year session
+    },
+  })
+);",error,https://www.npmjs.com/package/express-session
+14,Session Storage,Use Redis or database for session storage,"Store sessions in Redis or a database instead of in-memory. This supports horizontal scaling and persists sessions across server restarts.",Use connect-redis or connect-pg-simple for production session storage,Use the default MemoryStore in production - it leaks memory and cannot scale,"import session from 'express-session';
+import RedisStore from 'connect-redis';
+import { createClient } from 'redis';
+
+// Option 1: Redis store
+const redisClient = createClient({
+  url: process.env.REDIS_URL,
+  socket: { reconnectStrategy: (retries) => Math.min(retries * 100, 5000) },
+});
+
+redisClient.on('error', (err) => console.error('Redis error:', err));
+redisClient.on('connect', () => console.log('Redis connected'));
+await redisClient.connect();
+
+const redisStore = new RedisStore({
+  client: redisClient,
+  prefix: 'sess:',
+  ttl: 86400, // 24 hours in seconds
+});
+
+app.use(session({ store: redisStore, secret: process.env.SESSION_SECRET!, resave: false, saveUninitialized: false }));
+
+// Option 2: Prisma/Database store
+import { PrismaSessionStore } from '@quixo3/prisma-session-store';
+import { PrismaClient } from '@prisma/client';
+
+const prismaStore = new PrismaSessionStore(new PrismaClient(), {
+  checkPeriod: 2 * 60 * 1000, // prune expired sessions every 2 min
+  dbRecordIdIsSessionId: true,
+});
+
+app.use(session({ store: prismaStore, secret: process.env.SESSION_SECRET!, resave: false, saveUninitialized: false }));","import session from 'express-session';
+
+// BAD: Using default MemoryStore in production
+app.use(
+  session({
+    secret: 'my-secret',
+    // No store specified = MemoryStore
+    // WARNING: MemoryStore is not designed for production
+    // It will leak memory and does not scale across processes
+  })
+);
+
+// BAD: Custom in-memory store
+const sessions: Record<string, any> = {};
+app.use((req, res, next) => {
+  const sid = req.cookies.sid;
+  req.session = sessions[sid] || {};
+  next();
+});",warning,https://www.npmjs.com/package/connect-redis
+15,RBAC,Implement role-based access control middleware,"Create middleware that checks user roles before granting access to routes. Define roles hierarchically and use a middleware factory pattern.",Use a middleware factory that accepts allowed roles and checks against the authenticated user,Hardcode role checks in every route handler,"type Role = 'admin' | 'editor' | 'viewer';
+
+const roleHierarchy: Record<Role, number> = {
+  admin: 3,
+  editor: 2,
+  viewer: 1,
+};
+
+interface AuthUser {
+  id: string;
+  role: Role;
+}
+
+function requireRole(...allowedRoles: Role[]) {
+  return (req: express.Request & { user?: AuthUser }, res: express.Response, next: express.NextFunction) => {
+    if (!req.user) {
+      return res.status(401).json({ error: 'Authentication required' });
+    }
+
+    const hasRole = allowedRoles.some(
+      (role) => roleHierarchy[req.user!.role] >= roleHierarchy[role]
+    );
+
+    if (!hasRole) {
+      return res.status(403).json({ error: 'Insufficient permissions' });
+    }
+
+    next();
+  };
+}
+
+// Usage
+app.get('/api/posts', requireRole('viewer'), getPosts);
+app.post('/api/posts', requireRole('editor'), createPost);
+app.delete('/api/posts/:id', requireRole('admin'), deletePost);
+app.get('/api/admin/users', requireRole('admin'), listUsers);","// BAD: Hardcoded role checks scattered everywhere
+app.delete('/api/posts/:id', (req: any, res) => {
+  if (req.user.role !== 'admin') { // BAD: duplicated in every handler
+    return res.status(403).json({ error: 'Forbidden' });
+  }
+  // delete post...
+});
+
+app.get('/api/admin/users', (req: any, res) => {
+  if (req.user.role !== 'admin') { // BAD: same check copy-pasted
+    return res.status(403).json({ error: 'Forbidden' });
+  }
+  // list users...
+});",warning,https://en.wikipedia.org/wiki/Role-based_access_control
+16,Permission System,Implement granular permission-based authorization,"Create a permission system that maps roles to specific actions on resources. This provides fine-grained control beyond simple role checks.",Define permissions as resource-action pairs and check them in middleware,Use broad role checks when fine-grained permissions are needed,"type Resource = 'post' | 'user' | 'comment' | 'settings';
+type Action = 'create' | 'read' | 'update' | 'delete';
+type Permission = `${Resource}:${Action}`;
+
+const rolePermissions: Record<string, Permission[]> = {
+  admin: ['post:create', 'post:read', 'post:update', 'post:delete', 'user:create', 'user:read', 'user:update', 'user:delete', 'comment:create', 'comment:read', 'comment:update', 'comment:delete', 'settings:read', 'settings:update'],
+  editor: ['post:create', 'post:read', 'post:update', 'comment:create', 'comment:read', 'comment:update', 'comment:delete'],
+  viewer: ['post:read', 'comment:read', 'comment:create'],
+};
+
+function hasPermission(userRole: string, permission: Permission): boolean {
+  return rolePermissions[userRole]?.includes(permission) ?? false;
+}
+
+function requirePermission(permission: Permission) {
+  return (req: any, res: express.Response, next: express.NextFunction) => {
+    if (!req.user) {
+      return res.status(401).json({ error: 'Authentication required' });
+    }
+    if (!hasPermission(req.user.role, permission)) {
+      return res.status(403).json({ error: `Missing permission: ${permission}` });
+    }
+    next();
+  };
+}
+
+app.post('/api/posts', requirePermission('post:create'), createPost);
+app.delete('/api/users/:id', requirePermission('user:delete'), deleteUser);","// BAD: No permission system, just string comparisons
+app.post('/api/posts', (req: any, res) => {
+  // BAD: Magic strings, no centralized permission map
+  if (req.user.role === 'admin' || req.user.role === 'editor') {
+    // create post
+  } else {
+    res.status(403).json({ error: 'Forbidden' });
+  }
+});
+
+// BAD: Inconsistent checks across routes
+app.delete('/api/posts/:id', (req: any, res) => {
+  if (req.user.type === 'admin') { // BAD: different property name
+    // delete post
+  }
+});",warning,https://casl.js.org/v6/en/
+17,API Key Authentication,Implement secure API key authentication,"Use API keys for service-to-service or programmatic access. Store hashed keys in the database and compare using constant-time comparison.",Hash API keys before storage and use timingSafeEqual for comparison,Store API keys in plain text or use simple string comparison,"import crypto from 'crypto';
+import { timingSafeEqual } from 'crypto';
+
+function generateApiKey(): { key: string; hash: string } {
+  const key = `sk_live_${crypto.randomBytes(32).toString('hex')}`;
+  const hash = crypto.createHash('sha256').update(key).digest('hex');
+  return { key, hash };
+}
+
+function hashApiKey(key: string): string {
+  return crypto.createHash('sha256').update(key).digest('hex');
+}
+
+function safeCompare(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  return timingSafeEqual(Buffer.from(a), Buffer.from(b));
+}
+
+async function apiKeyAuth(req: express.Request, res: express.Response, next: express.NextFunction) {
+  const apiKey = req.headers['x-api-key'] as string;
+  if (!apiKey) {
+    return res.status(401).json({ error: 'API key required' });
+  }
+
+  const hashedKey = hashApiKey(apiKey);
+  const storedKey = await db.apiKey.findFirst({
+    where: { hash: hashedKey, revoked: false },
+    include: { user: { select: { id: true, role: true } } },
+  });
+
+  if (!storedKey) {
+    return res.status(401).json({ error: 'Invalid API key' });
+  }
+
+  await db.apiKey.update({ where: { id: storedKey.id }, data: { lastUsedAt: new Date() } });
+  (req as any).user = storedKey.user;
+  next();
+}
+
+app.use('/api/v1', apiKeyAuth);","// BAD: Plain text keys, simple comparison
+const API_KEYS = ['abc123', 'def456']; // BAD: hardcoded, plain text
+
+function apiKeyAuth(req: any, res: any, next: any) {
+  const key = req.query.apiKey; // BAD: key in URL query string (logged!)
+  if (API_KEYS.includes(key)) { // BAD: not constant-time comparison
+    next();
+  } else {
+    res.status(401).send('Unauthorized');
+  }
+}",error,https://owasp.org/www-community/controls/Certificate_and_Public_Key_Pinning
+18,Rate Limiting Auth,Implement rate limiting for authentication endpoints,"Rate limit login attempts to prevent brute-force attacks. Track failed attempts per IP and username with exponential backoff.",Track failed attempts per IP and account with progressive delays,Allow unlimited login attempts or only rate limit by IP,"import rateLimit from 'express-rate-limit';
+import RedisStore from 'rate-limit-redis';
+import { createClient } from 'redis';
+
+const redisClient = createClient({ url: process.env.REDIS_URL });
+await redisClient.connect();
+
+// General rate limiter for auth endpoints
+const authLimiter = rateLimit({
+  store: new RedisStore({ sendCommand: (...args: string[]) => redisClient.sendCommand(args) }),
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 10, // 10 attempts per window
+  message: { error: 'Too many login attempts, please try again later' },
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => `auth:${req.ip}:${req.body?.email || 'unknown'}`,
+  skipSuccessfulRequests: true,
+});
+
+// Stricter limiter for sensitive operations
+const strictLimiter = rateLimit({
+  store: new RedisStore({ sendCommand: (...args: string[]) => redisClient.sendCommand(args) }),
+  windowMs: 60 * 60 * 1000, // 1 hour
+  max: 5,
+  message: { error: 'Too many attempts, account temporarily locked' },
+  keyGenerator: (req) => `strict:${req.body?.email || req.ip}`,
+});
+
+app.post('/auth/login', authLimiter, loginHandler);
+app.post('/auth/reset-password', strictLimiter, resetPasswordHandler);
+app.post('/auth/verify-mfa', strictLimiter, verifyMfaHandler);","// BAD: No rate limiting on auth endpoints
+app.post('/login', async (req, res) => {
+  const { email, password } = req.body;
+  const user = await db.user.findUnique({ where: { email } });
+  if (!user) return res.status(401).json({ error: 'Invalid credentials' });
+  const valid = await bcrypt.compare(password, user.password);
+  if (!valid) return res.status(401).json({ error: 'Invalid credentials' });
+  // No rate limiting = unlimited brute force attempts!
+  res.json({ token: createToken(user) });
+});",error,https://www.npmjs.com/package/express-rate-limit
+19,CSRF Protection,Implement token-based CSRF prevention,"Protect state-changing endpoints from cross-site request forgery using the synchronizer token pattern or double submit cookie.",Use csurf or a custom CSRF token middleware for all state-changing routes,Rely solely on SameSite cookies or skip CSRF protection for API endpoints that use cookies,"import { doubleCsrf } from 'csrf-csrf';
+import cookieParser from 'cookie-parser';
+
+const { doubleCsrfProtection, generateToken } = doubleCsrf({
+  getSecret: () => process.env.CSRF_SECRET!,
+  cookieName: '__Host-csrf',
+  cookieOptions: {
+    httpOnly: true,
+    sameSite: 'strict',
+    secure: process.env.NODE_ENV === 'production',
+    path: '/',
+  },
+  getTokenFromRequest: (req) => req.headers['x-csrf-token'] as string,
+});
+
+app.use(cookieParser());
+
+// Generate CSRF token endpoint
+app.get('/api/csrf-token', (req, res) => {
+  const token = generateToken(req, res);
+  res.json({ csrfToken: token });
+});
+
+// Apply CSRF protection to state-changing routes
+app.post('/api/*', doubleCsrfProtection);
+app.put('/api/*', doubleCsrfProtection);
+app.delete('/api/*', doubleCsrfProtection);
+
+// Protected route
+app.post('/api/transfer', doubleCsrfProtection, (req, res) => {
+  // Request must include x-csrf-token header
+  res.json({ message: 'Transfer completed' });
+});","// BAD: No CSRF protection at all
+app.post('/api/transfer', (req, res) => {
+  // Any site can submit a form to this endpoint
+  // if the user has a valid session cookie
+  const { to, amount } = req.body;
+  processTransfer(req.session.userId, to, amount);
+  res.json({ message: 'Done' });
+});
+
+// BAD: Relying only on SameSite=Lax (doesn't protect top-level navigations)
+app.use(session({
+  cookie: { sameSite: 'lax' }, // Not sufficient alone for CSRF protection
+}));",error,https://cheatsheetseries.owasp.org/cheatsheets/Cross-Site_Request_Forgery_Prevention_Cheat_Sheet.html
+20,Secure Cookie Settings,Configure cookies with proper security attributes,"Always set httpOnly, secure, sameSite, and appropriate maxAge on authentication cookies. Use the __Host- prefix for additional security.",Set httpOnly to prevent XSS access and secure for HTTPS-only transmission,Leave cookie settings at defaults or set overly permissive attributes,"import express from 'express';
+
+const app = express();
+
+// Setting a secure authentication cookie
+app.post('/login', async (req, res) => {
+  const user = await authenticateUser(req.body);
+  const sessionId = await createSession(user.id);
+
+  res.cookie('__Host-session', sessionId, {
+    httpOnly: true,       // Not accessible via JavaScript
+    secure: true,         // Only sent over HTTPS
+    sameSite: 'lax',      // Protects against CSRF
+    maxAge: 24 * 60 * 60 * 1000, // 24 hours
+    path: '/',            // Required for __Host- prefix
+  });
+
+  res.json({ message: 'Logged in' });
+});
+
+// Clearing the cookie on logout
+app.post('/logout', (req, res) => {
+  res.clearCookie('__Host-session', {
+    httpOnly: true,
+    secure: true,
+    sameSite: 'lax',
+    path: '/',
+  });
+  res.json({ message: 'Logged out' });
+});","// BAD: Insecure cookie settings
+app.post('/login', (req, res) => {
+  const token = createToken(req.body);
+  res.cookie('session', token, {
+    // httpOnly missing - cookie accessible via document.cookie (XSS risk!)
+    // secure missing - cookie sent over HTTP (man-in-the-middle risk!)
+    // sameSite missing - cookie sent with cross-site requests (CSRF risk!)
+    maxAge: 365 * 24 * 60 * 60 * 1000, // BAD: 1 year
+  });
+  res.json({ ok: true });
+});",error,https://developer.mozilla.org/en-US/docs/Web/HTTP/Cookies
+21,Password Reset Flow,Implement secure token-based password reset,"Generate a cryptographically random token for password reset links. Store a hashed version in the database with a short expiration time.",Hash reset tokens before storage and expire them within 1 hour,Send passwords via email or use predictable reset tokens,"import crypto from 'crypto';
+import bcrypt from 'bcrypt';
+
+async function requestPasswordReset(email: string): Promise<void> {
+  const user = await db.user.findUnique({ where: { email } });
+
+  // Always return success to prevent email enumeration
+  if (!user) return;
+
+  // Delete any existing reset tokens
+  await db.passwordReset.deleteMany({ where: { userId: user.id } });
+
+  // Generate secure random token
+  const token = crypto.randomBytes(32).toString('hex');
+  const hashedToken = crypto.createHash('sha256').update(token).digest('hex');
+
+  await db.passwordReset.create({
+    data: {
+      userId: user.id,
+      token: hashedToken,
+      expiresAt: new Date(Date.now() + 60 * 60 * 1000), // 1 hour
+    },
+  });
+
+  await sendEmail(email, {
+    subject: 'Password Reset',
+    html: `<a href=""${process.env.APP_URL}/reset-password?token=${token}"">Reset your password</a>`,
+  });
+}
+
+async function resetPassword(token: string, newPassword: string): Promise<boolean> {
+  const hashedToken = crypto.createHash('sha256').update(token).digest('hex');
+
+  const resetRecord = await db.passwordReset.findFirst({
+    where: { token: hashedToken, expiresAt: { gt: new Date() } },
+  });
+
+  if (!resetRecord) return false;
+
+  const hashedPassword = await bcrypt.hash(newPassword, 12);
+  await db.user.update({ where: { id: resetRecord.userId }, data: { password: hashedPassword } });
+  await db.passwordReset.delete({ where: { id: resetRecord.id } });
+
+  return true;
+}","// BAD: Predictable tokens, no hashing, no expiration
+async function requestReset(email: string) {
+  const user = await db.user.findUnique({ where: { email } });
+  if (!user) {
+    throw new Error('User not found'); // BAD: reveals user existence
+  }
+
+  const token = String(user.id); // BAD: predictable token
+  await db.passwordReset.create({
+    data: {
+      userId: user.id,
+      token, // BAD: stored in plain text
+      // No expiration!
+    },
+  });
+
+  await sendEmail(email, { text: `Your new password is: tempPass123` }); // BAD: sending password via email
+}",error,https://cheatsheetseries.owasp.org/cheatsheets/Forgot_Password_Cheat_Sheet.html
+22,Email Verification,Implement email verification with secure tokens,"Send verification emails with a cryptographically random token. Verify the token and mark the account as verified upon confirmation.",Use random tokens with expiration and hash before storage,Use easily guessable verification codes or skip email verification,"import crypto from 'crypto';
+
+async function sendVerificationEmail(userId: string, email: string): Promise<void> {
+  const token = crypto.randomBytes(32).toString('hex');
+  const hashedToken = crypto.createHash('sha256').update(token).digest('hex');
+
+  await db.emailVerification.upsert({
+    where: { userId },
+    create: {
+      userId,
+      token: hashedToken,
+      expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000), // 24 hours
+    },
+    update: {
+      token: hashedToken,
+      expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
+    },
+  });
+
+  await sendEmail(email, {
+    subject: 'Verify your email',
+    html: `<a href=""${process.env.APP_URL}/verify-email?token=${token}"">Verify Email</a>`,
+  });
+}
+
+app.get('/verify-email', async (req, res) => {
+  const { token } = req.query;
+  if (!token || typeof token !== 'string') {
+    return res.status(400).json({ error: 'Token required' });
+  }
+
+  const hashedToken = crypto.createHash('sha256').update(token).digest('hex');
+  const verification = await db.emailVerification.findFirst({
+    where: { token: hashedToken, expiresAt: { gt: new Date() } },
+  });
+
+  if (!verification) {
+    return res.status(400).json({ error: 'Invalid or expired token' });
+  }
+
+  await db.user.update({ where: { id: verification.userId }, data: { emailVerified: true } });
+  await db.emailVerification.delete({ where: { id: verification.id } });
+
+  res.json({ message: 'Email verified successfully' });
+});","// BAD: Sequential IDs, no hashing, no expiration
+let verificationCounter = 1;
+
+async function sendVerification(email: string) {
+  const code = verificationCounter++; // BAD: sequential and predictable
+  await db.emailVerification.create({
+    data: { email, code: String(code) }, // BAD: no hashing
+    // No expiration
+  });
+  await sendEmail(email, { text: `Your code: ${code}` });
+}
+
+app.get('/verify', async (req, res) => {
+  const record = await db.emailVerification.findFirst({
+    where: { code: req.query.code as string },
+  });
+  if (record) {
+    // BAD: doesn't delete the token - can be reused
+    res.json({ verified: true });
+  }
+});",error,https://cheatsheetseries.owasp.org/cheatsheets/Input_Validation_Cheat_Sheet.html
+23,Multi-Factor Auth,Implement TOTP-based two-factor authentication,"Use the otpauth library to generate and verify time-based one-time passwords (TOTP). Provide QR codes for authenticator app setup and backup codes.",Generate TOTP secrets per user and verify with a time window for clock skew,Use SMS-only 2FA or implement TOTP without backup codes,"import { TOTP, Secret } from 'otpauth';
+import QRCode from 'qrcode';
+import crypto from 'crypto';
+
+function createTOTP(userEmail: string, secret: string): TOTP {
+  return new TOTP({
+    issuer: 'MyApp',
+    label: userEmail,
+    algorithm: 'SHA1',
+    digits: 6,
+    period: 30,
+    secret: Secret.fromHex(secret),
+  });
+}
+
+app.post('/api/mfa/setup', async (req: any, res) => {
+  const user = req.user;
+  const secret = crypto.randomBytes(20).toString('hex');
+  const totp = createTOTP(user.email, secret);
+
+  // Generate backup codes
+  const backupCodes = Array.from({ length: 10 }, () =>
+    crypto.randomBytes(4).toString('hex')
+  );
+  const hashedBackupCodes = backupCodes.map((code) =>
+    crypto.createHash('sha256').update(code).digest('hex')
+  );
+
+  await db.user.update({
+    where: { id: user.id },
+    data: { mfaSecret: secret, mfaBackupCodes: hashedBackupCodes },
+  });
+
+  const qrCodeUrl = await QRCode.toDataURL(totp.toString());
+  res.json({ qrCode: qrCodeUrl, backupCodes });
+});
+
+app.post('/api/mfa/verify', async (req: any, res) => {
+  const { code } = req.body;
+  const user = await db.user.findUnique({ where: { id: req.user.id } });
+
+  const totp = createTOTP(user!.email, user!.mfaSecret!);
+  const delta = totp.validate({ token: code, window: 1 });
+
+  if (delta !== null) {
+    req.session.mfaVerified = true;
+    return res.json({ verified: true });
+  }
+
+  res.status(401).json({ error: 'Invalid code' });
+});","// BAD: Weak OTP implementation without proper library
+function generateOTP(): string {
+  return String(Math.floor(100000 + Math.random() * 900000)); // BAD: Math.random is not cryptographic
+}
+
+app.post('/mfa/setup', async (req: any, res) => {
+  const otp = generateOTP();
+  // BAD: storing OTP in plain text, no expiration
+  await db.user.update({ where: { id: req.user.id }, data: { otpCode: otp } });
+  // BAD: no QR code, no authenticator app integration
+  // BAD: no backup codes
+  res.json({ code: otp }); // BAD: sending OTP in response
+});",warning,https://www.npmjs.com/package/otpauth
+24,Token Revocation,Implement token blacklist and whitelist strategies,"Maintain a mechanism to revoke JWT tokens before their natural expiration. Use Redis for fast lookups and consider both blacklist and whitelist approaches.",Use Redis-based token blacklisting with automatic TTL expiration,Rely solely on short token expiry without any revocation mechanism,"import { createClient } from 'redis';
+import jwt from 'jsonwebtoken';
+
+const redis = createClient({ url: process.env.REDIS_URL });
+await redis.connect();
+
+// Blacklist approach: store revoked token IDs
+async function revokeToken(tokenId: string, expiresAt: number): Promise<void> {
+  const ttl = expiresAt - Math.floor(Date.now() / 1000);
+  if (ttl > 0) {
+    await redis.setEx(`revoked:${tokenId}`, ttl, '1');
+  }
+}
+
+async function isTokenRevoked(tokenId: string): Promise<boolean> {
+  const result = await redis.get(`revoked:${tokenId}`);
+  return result !== null;
+}
+
+// Middleware that checks revocation
+async function authMiddleware(req: any, res: any, next: any) {
+  const token = req.headers.authorization?.split(' ')[1];
+  if (!token) return res.status(401).json({ error: 'Token required' });
+
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET!) as { sub: string; jti: string; exp: number };
+
+    if (await isTokenRevoked(decoded.jti)) {
+      return res.status(401).json({ error: 'Token has been revoked' });
+    }
+
+    req.user = decoded;
+    next();
+  } catch {
+    res.status(401).json({ error: 'Invalid token' });
+  }
+}
+
+// Logout: revoke the current token
+app.post('/logout', authMiddleware, async (req: any, res) => {
+  await revokeToken(req.user.jti, req.user.exp);
+  res.json({ message: 'Logged out' });
+});
+
+// Revoke all user tokens (e.g., password change)
+app.post('/revoke-all', authMiddleware, async (req: any, res) => {
+  await redis.setEx(`user-revoked:${req.user.sub}`, 86400, String(Date.now()));
+  res.json({ message: 'All tokens revoked' });
+});","// BAD: No token revocation at all
+app.post('/logout', (req, res) => {
+  // Just tells the client to delete the token
+  // Server has no way to invalidate it!
+  res.json({ message: 'Please delete your token' });
+});
+
+// BAD: In-memory blacklist that doesn't scale
+const blacklist = new Set<string>(); // Lost on restart, not shared across instances
+app.post('/logout', (req: any, res) => {
+  blacklist.add(req.token);
+  res.json({ message: 'Logged out' });
+});",warning,https://auth0.com/blog/denylist-json-web-token-api-keys/
+25,Auth Testing,Mock authentication in tests properly,"Create test utilities that mock authentication middleware and provide factory functions for authenticated requests. Test both authorized and unauthorized scenarios.",Create reusable auth test helpers and test all authorization paths,Skip auth in tests or test only the happy path,"import request from 'supertest';
+import jwt from 'jsonwebtoken';
+import { app } from '../app';
+
+// Test helper: generate test tokens
+function createTestToken(overrides: Partial<{ sub: string; role: string }> = {}) {
+  return jwt.sign(
+    {
+      sub: overrides.sub ?? 'test-user-id',
+      role: overrides.role ?? 'viewer',
+      jti: 'test-jti',
+    },
+    process.env.JWT_SECRET!,
+    { expiresIn: '1h' }
+  );
+}
+
+function authenticatedRequest(method: 'get' | 'post' | 'put' | 'delete', url: string, role = 'viewer') {
+  const token = createTestToken({ role });
+  return (request(app) as any)[method](url).set('Authorization', `Bearer ${token}`);
+}
+
+describe('Protected Routes', () => {
+  describe('GET /api/posts', () => {
+    it('should return 401 without a token', async () => {
+      const res = await request(app).get('/api/posts');
+      expect(res.status).toBe(401);
+    });
+
+    it('should return 200 for authenticated users', async () => {
+      const res = await authenticatedRequest('get', '/api/posts');
+      expect(res.status).toBe(200);
+    });
+
+    it('should return 403 for insufficient role', async () => {
+      const res = await authenticatedRequest('delete', '/api/posts/1', 'viewer');
+      expect(res.status).toBe(403);
+    });
+
+    it('should return 200 for admin users', async () => {
+      const res = await authenticatedRequest('delete', '/api/posts/1', 'admin');
+      expect(res.status).toBe(200);
+    });
+
+    it('should return 401 for expired tokens', async () => {
+      const expiredToken = jwt.sign({ sub: 'user', role: 'admin' }, process.env.JWT_SECRET!, { expiresIn: '0s' });
+      const res = await request(app).get('/api/posts').set('Authorization', `Bearer ${expiredToken}`);
+      expect(res.status).toBe(401);
+    });
+  });
+});","// BAD: Skipping auth in tests or only testing happy path
+describe('Protected Routes', () => {
+  // BAD: Disabling auth for all tests
+  beforeAll(() => {
+    process.env.SKIP_AUTH = 'true';
+  });
+
+  it('should return posts', async () => {
+    const res = await request(app).get('/api/posts');
+    expect(res.status).toBe(200); // Only tests happy path
+    // Never tests 401, 403, expired tokens, or wrong roles
+  });
+});",warning,https://jestjs.io/docs/mock-functions

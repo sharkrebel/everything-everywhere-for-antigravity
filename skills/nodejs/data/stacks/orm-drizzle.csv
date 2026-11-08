@@ -1,0 +1,910 @@
+No,Category,Guideline,Description,Do,Dont,Code Good,Code Bad,Severity,Docs URL
+1,Schema Definition,"Define tables with pgTable, typed columns, and indexes","Use pgTable to define your database schema with strongly-typed columns, constraints, and indexes. Keep schema files modular — one file per domain entity.","Use pgTable with explicit column types and constraints; add indexes for frequently queried columns","Dont use raw SQL strings for schema; dont skip NOT NULL constraints on required fields","import { pgTable, serial, varchar, timestamp, integer, index, uniqueIndex } from 'drizzle-orm/pg-core';
+
+export const users = pgTable('users', {
+  id: serial('id').primaryKey(),
+  email: varchar('email', { length: 255 }).notNull(),
+  name: varchar('name', { length: 100 }).notNull(),
+  age: integer('age'),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+}, (table) => ({
+  emailIdx: uniqueIndex('users_email_idx').on(table.email),
+  nameIdx: index('users_name_idx').on(table.name),
+}));","import { pgTable, serial, varchar } from 'drizzle-orm/pg-core';
+
+// Bad: no indexes, no constraints, no timestamps
+const users = pgTable('users', {
+  id: serial('id'),
+  email: varchar('email'),
+  name: varchar('name'),
+});",error,https://orm.drizzle.team/docs/sql-schema-declaration
+2,Client Setup,"Initialize drizzle with a pg Pool connection","Create a single drizzle client instance using a PostgreSQL connection pool. Export it for reuse across your application. Never create multiple drizzle instances.","Create one drizzle instance with a connection pool; export it as a singleton","Dont create a new drizzle client per request; dont use a single connection instead of a pool","import { drizzle } from 'drizzle-orm/node-postgres';
+import { Pool } from 'pg';
+import * as schema from './schema';
+
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  max: 20,
+  idleTimeoutMillis: 30000,
+  connectionTimeoutMillis: 5000,
+});
+
+export const db = drizzle(pool, { schema, logger: process.env.NODE_ENV === 'development' });","import { drizzle } from 'drizzle-orm/node-postgres';
+import { Client } from 'pg';
+
+// Bad: single connection, no pool, no schema, created inline
+export function getDb() {
+  const client = new Client(process.env.DATABASE_URL);
+  client.connect();
+  return drizzle(client);
+}",error,https://orm.drizzle.team/docs/get-started-postgresql
+3,Select Queries,"Use db.select().from() for type-safe queries","Build SELECT queries using the fluent query builder. Use .select() with specific columns to avoid fetching unnecessary data. Chain .where() for filtering.","Select only needed columns; use the query builder for type safety","Dont select all columns when you only need a few; dont build queries with string concatenation","import { eq } from 'drizzle-orm';
+import { db } from './db';
+import { users } from './schema';
+
+// Select specific columns
+const userEmails = await db
+  .select({
+    id: users.id,
+    email: users.email,
+  })
+  .from(users)
+  .where(eq(users.age, 25));
+
+// Select all columns when needed
+const allUsers = await db.select().from(users);","import { db } from './db';
+import { users } from './schema';
+
+// Bad: using raw query when builder works fine
+const result = await db.execute(
+  `SELECT * FROM users WHERE age = 25`
+);
+
+// Bad: no type safety, no parameterization
+const name = userInput;
+const bad = await db.execute(`SELECT * FROM users WHERE name = '${name}'`);",warning,https://orm.drizzle.team/docs/select
+4,Insert Operations,"Use db.insert(table).values() with returning()","Insert rows using the type-safe .insert().values() method. Always use .returning() when you need the inserted row back. Use the inferred insert type for input validation.","Use .returning() to get inserted data; validate input types with InferInsertModel","Dont manually construct INSERT SQL; dont skip returning() when you need the new row","import { db } from './db';
+import { users } from './schema';
+import type { InferInsertModel } from 'drizzle-orm';
+
+type NewUser = InferInsertModel<typeof users>;
+
+async function createUser(data: NewUser) {
+  const [inserted] = await db
+    .insert(users)
+    .values({
+      email: data.email,
+      name: data.name,
+      age: data.age,
+    })
+    .returning();
+
+  return inserted;
+}","import { db } from './db';
+import { users } from './schema';
+
+// Bad: no returning, no type safety, manual SQL
+async function createUser(data: any) {
+  await db.insert(users).values(data);
+  // Now you have to do a separate query to get the inserted row
+  const user = await db.select().from(users).where(eq(users.email, data.email));
+  return user[0];
+}",error,https://orm.drizzle.team/docs/insert
+5,Update Operations,"Use db.update(table).set().where() with returning()","Update rows using the fluent .update().set().where() chain. Always include a .where() clause to avoid updating all rows. Use .returning() to confirm changes.","Always include a where clause; use returning() to confirm the update","Dont update without a where clause; dont assume the update succeeded without checking","import { eq } from 'drizzle-orm';
+import { db } from './db';
+import { users } from './schema';
+
+async function updateUserEmail(userId: number, newEmail: string) {
+  const [updated] = await db
+    .update(users)
+    .set({
+      email: newEmail,
+      updatedAt: new Date(),
+    })
+    .where(eq(users.id, userId))
+    .returning();
+
+  if (!updated) {
+    throw new Error(`User ${userId} not found`);
+  }
+  return updated;
+}","import { db } from './db';
+import { users } from './schema';
+
+// Bad: no where clause updates ALL rows
+async function updateUserEmail(newEmail: string) {
+  await db.update(users).set({ email: newEmail });
+}
+
+// Bad: no returning, no existence check
+async function updateUser(id: number, email: string) {
+  await db.update(users).set({ email }).where(eq(users.id, id));
+  return { success: true };
+}",error,https://orm.drizzle.team/docs/update
+6,Delete Operations,"Use db.delete(table).where() with a mandatory filter","Delete rows using .delete().where(). Never call delete without a where clause. Use .returning() if you need to confirm what was deleted.","Always use a where clause; use returning() to verify deletion","Dont delete without a where clause; dont ignore the deletion result","import { eq } from 'drizzle-orm';
+import { db } from './db';
+import { users } from './schema';
+
+async function deleteUser(userId: number) {
+  const [deleted] = await db
+    .delete(users)
+    .where(eq(users.id, userId))
+    .returning({ id: users.id, email: users.email });
+
+  if (!deleted) {
+    throw new Error(`User ${userId} not found`);
+  }
+  return deleted;
+}","import { db } from './db';
+import { users } from './schema';
+
+// Bad: deletes ALL rows — catastrophic
+async function deleteUser() {
+  await db.delete(users);
+}
+
+// Bad: no check if anything was actually deleted
+async function removeUser(id: number) {
+  await db.delete(users).where(eq(users.id, id));
+  return 'deleted';
+}",error,https://orm.drizzle.team/docs/delete
+7,Where Clauses,"Use eq, ne, gt, lt, like, and, or for type-safe filters","Combine Drizzle filter operators for complex WHERE conditions. Use and() and or() to compose multiple conditions. All operators are fully type-safe.","Use typed operators like eq, gt, like; compose with and/or","Dont use raw SQL strings for conditions; dont nest conditions without and/or helpers","import { eq, ne, gt, lt, like, and, or, between, isNull, inArray } from 'drizzle-orm';
+import { db } from './db';
+import { users } from './schema';
+
+// Complex where clause
+const results = await db
+  .select()
+  .from(users)
+  .where(
+    and(
+      gt(users.age, 18),
+      lt(users.age, 65),
+      or(
+        like(users.email, '%@gmail.com'),
+        like(users.email, '%@outlook.com')
+      ),
+      isNull(users.deletedAt)
+    )
+  );
+
+// Using inArray for IN clauses
+const specific = await db
+  .select()
+  .from(users)
+  .where(inArray(users.id, [1, 2, 3]));","import { db } from './db';
+import { users } from './schema';
+
+// Bad: raw SQL in where, no type safety
+const results = await db.execute(
+  `SELECT * FROM users WHERE age > 18 AND age < 65 AND email LIKE '%@gmail.com'`
+);
+
+// Bad: multiple separate queries instead of composing
+const gmail = await db.select().from(users).where(like(users.email, '%@gmail.com'));
+const outlook = await db.select().from(users).where(like(users.email, '%@outlook.com'));
+const combined = [...gmail, ...outlook];",warning,https://orm.drizzle.team/docs/operators
+8,Joins,"Use innerJoin, leftJoin, rightJoin for multi-table queries","Join tables using the fluent join methods. Specify the join condition with the on parameter. Alias columns to avoid name collisions.","Use typed join methods with explicit on conditions; alias overlapping columns","Dont use raw SQL for joins; dont forget to handle null results from left joins","import { eq } from 'drizzle-orm';
+import { db } from './db';
+import { users, posts, comments } from './schema';
+
+// Left join with explicit column selection
+const usersWithPosts = await db
+  .select({
+    userId: users.id,
+    userName: users.name,
+    postId: posts.id,
+    postTitle: posts.title,
+  })
+  .from(users)
+  .leftJoin(posts, eq(users.id, posts.authorId));
+
+// Multiple joins
+const fullData = await db
+  .select({
+    user: users.name,
+    post: posts.title,
+    comment: comments.content,
+  })
+  .from(users)
+  .innerJoin(posts, eq(users.id, posts.authorId))
+  .leftJoin(comments, eq(posts.id, comments.postId));","import { db } from './db';
+import { users, posts } from './schema';
+
+// Bad: raw SQL join, no type safety
+const result = await db.execute(
+  `SELECT u.*, p.* FROM users u LEFT JOIN posts p ON u.id = p.author_id`
+);
+
+// Bad: N+1 — fetching posts separately per user
+const allUsers = await db.select().from(users);
+for (const user of allUsers) {
+  const userPosts = await db.select().from(posts).where(eq(posts.authorId, user.id));
+}",warning,https://orm.drizzle.team/docs/joins
+9,Relations,"Define relations() for type-safe relational queries","Use the relations() helper to declare one-to-many and many-to-many relationships. This enables the relational query API with db.query for nested data fetching.","Define relations in schema; use db.query for nested fetches","Dont skip relation definitions; dont use manual joins when relational queries suffice","import { relations } from 'drizzle-orm';
+import { pgTable, serial, varchar, integer } from 'drizzle-orm/pg-core';
+
+export const users = pgTable('users', {
+  id: serial('id').primaryKey(),
+  name: varchar('name', { length: 100 }).notNull(),
+});
+
+export const posts = pgTable('posts', {
+  id: serial('id').primaryKey(),
+  title: varchar('title', { length: 255 }).notNull(),
+  authorId: integer('author_id').notNull().references(() => users.id),
+});
+
+export const usersRelations = relations(users, ({ many }) => ({
+  posts: many(posts),
+}));
+
+export const postsRelations = relations(posts, ({ one }) => ({
+  author: one(users, { fields: [posts.authorId], references: [users.id] }),
+}));
+
+// Usage with relational query
+const usersWithPosts = await db.query.users.findMany({
+  with: { posts: true },
+});","import { pgTable, serial, varchar, integer } from 'drizzle-orm/pg-core';
+
+// Bad: no relations defined, forced to use manual joins everywhere
+export const users = pgTable('users', {
+  id: serial('id').primaryKey(),
+  name: varchar('name', { length: 100 }),
+});
+
+export const posts = pgTable('posts', {
+  id: serial('id').primaryKey(),
+  authorId: integer('author_id'),
+});
+
+// Bad: manual nested fetching without relational API
+const users = await db.select().from(users);
+const result = await Promise.all(
+  users.map(async (u) => ({
+    ...u,
+    posts: await db.select().from(posts).where(eq(posts.authorId, u.id)),
+  }))
+);",warning,https://orm.drizzle.team/docs/rqb
+10,Subqueries,"Use db.$with for Common Table Expressions (CTEs)","Use $with to create named subqueries (CTEs) for complex queries. This improves readability and allows reuse of intermediate results.","Use $with for CTEs; keep subqueries readable and named","Dont inline complex subqueries; dont nest more than 2-3 levels deep","import { db } from './db';
+import { users, orders } from './schema';
+import { eq, sql, gt } from 'drizzle-orm';
+
+const userOrderCounts = db.$with('user_order_counts').as(
+  db
+    .select({
+      userId: orders.userId,
+      orderCount: sql<number>`count(*)`.as('order_count'),
+      totalSpent: sql<number>`sum(${orders.amount})`.as('total_spent'),
+    })
+    .from(orders)
+    .groupBy(orders.userId)
+);
+
+const highValueUsers = await db
+  .with(userOrderCounts)
+  .select({
+    name: users.name,
+    email: users.email,
+    orderCount: userOrderCounts.orderCount,
+    totalSpent: userOrderCounts.totalSpent,
+  })
+  .from(users)
+  .innerJoin(userOrderCounts, eq(users.id, userOrderCounts.userId))
+  .where(gt(userOrderCounts.totalSpent, 1000));","import { db } from './db';
+import { users, orders } from './schema';
+
+// Bad: deeply nested raw SQL subquery
+const result = await db.execute(sql`
+  SELECT u.name, u.email, sub.order_count, sub.total_spent
+  FROM users u
+  INNER JOIN (
+    SELECT user_id, count(*) as order_count, sum(amount) as total_spent
+    FROM orders
+    GROUP BY user_id
+  ) sub ON u.id = sub.user_id
+  WHERE sub.total_spent > 1000
+`);",info,https://orm.drizzle.team/docs/select#with-clause
+11,Transactions,"Use db.transaction() for atomic multi-step operations","Wrap related database operations in a transaction to ensure atomicity. Use the provided tx object for all queries within the transaction. Throw an error to trigger a rollback.","Use db.transaction with the tx parameter; throw to rollback","Dont mix db and tx inside a transaction; dont swallow errors silently","import { db } from './db';
+import { accounts, transfers } from './schema';
+import { eq, sql } from 'drizzle-orm';
+
+async function transferFunds(fromId: number, toId: number, amount: number) {
+  return await db.transaction(async (tx) => {
+    // Debit source account
+    const [source] = await tx
+      .update(accounts)
+      .set({ balance: sql`${accounts.balance} - ${amount}` })
+      .where(eq(accounts.id, fromId))
+      .returning();
+
+    if (source.balance < 0) {
+      throw new Error('Insufficient funds'); // triggers rollback
+    }
+
+    // Credit destination account
+    const [dest] = await tx
+      .update(accounts)
+      .set({ balance: sql`${accounts.balance} + ${amount}` })
+      .where(eq(accounts.id, toId))
+      .returning();
+
+    // Record the transfer
+    await tx.insert(transfers).values({ fromId, toId, amount });
+
+    return { source, dest };
+  });
+}","import { db } from './db';
+import { accounts } from './schema';
+import { eq, sql } from 'drizzle-orm';
+
+// Bad: no transaction, operations can partially fail
+async function transferFunds(fromId: number, toId: number, amount: number) {
+  await db.update(accounts).set({ balance: sql`${accounts.balance} - ${amount}` }).where(eq(accounts.id, fromId));
+  // If this fails, the debit already happened!
+  await db.update(accounts).set({ balance: sql`${accounts.balance} + ${amount}` }).where(eq(accounts.id, toId));
+}",error,https://orm.drizzle.team/docs/transactions
+12,Migrations,"Use drizzle-kit generate and migrate for schema changes","Generate SQL migration files from schema changes using drizzle-kit generate. Apply them with drizzle-kit migrate or programmatically with the migrate() function.","Use drizzle-kit generate for migrations; review generated SQL before applying","Dont push directly to production; dont skip reviewing migration SQL","// drizzle.config.ts
+import { defineConfig } from 'drizzle-kit';
+
+export default defineConfig({
+  schema: './src/schema.ts',
+  out: './drizzle/migrations',
+  dialect: 'postgresql',
+  dbCredentials: {
+    url: process.env.DATABASE_URL!,
+  },
+});
+
+// src/migrate.ts — programmatic migration
+import { drizzle } from 'drizzle-orm/node-postgres';
+import { migrate } from 'drizzle-orm/node-postgres/migrator';
+import { Pool } from 'pg';
+
+async function runMigrations() {
+  const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+  const db = drizzle(pool);
+  await migrate(db, { migrationsFolder: './drizzle/migrations' });
+  await pool.end();
+  console.log('Migrations complete');
+}
+
+runMigrations();","// Bad: no config file, running push in production
+// package.json
+// ""migrate"": ""drizzle-kit push""
+
+// Bad: no migration folder structure, manual SQL files
+// migrations/001.sql — hand-written, not tracked by drizzle-kit
+// ALTER TABLE users ADD COLUMN age INTEGER;",error,https://orm.drizzle.team/docs/migrations
+13,Push Schema,"Use drizzle-kit push only in development for rapid iteration","drizzle-kit push applies schema changes directly to the database without generating migration files. Use it for fast development iteration only — never in production.","Use push for local development; use generate/migrate for staging and production","Dont use push in production; dont rely on push for team collaboration","// package.json scripts for proper environment separation
+// {
+//   ""scripts"": {
+//     ""db:push"": ""drizzle-kit push"",
+//     ""db:generate"": ""drizzle-kit generate"",
+//     ""db:migrate"": ""drizzle-kit migrate"",
+//     ""db:studio"": ""drizzle-kit studio""
+//   }
+// }
+
+// drizzle.config.ts
+import { defineConfig } from 'drizzle-kit';
+
+export default defineConfig({
+  schema: './src/schema.ts',
+  out: './drizzle/migrations',
+  dialect: 'postgresql',
+  dbCredentials: {
+    url: process.env.DATABASE_URL!,
+  },
+  verbose: true,
+  strict: true, // asks for confirmation before destructive changes
+});","// Bad: using push in production deployment script
+// deploy.sh:
+// drizzle-kit push --config=drizzle.config.prod.ts
+
+// Bad: no strict mode, no verbose — silent destructive changes
+import { defineConfig } from 'drizzle-kit';
+export default defineConfig({
+  schema: './src/schema.ts',
+  dialect: 'postgresql',
+  dbCredentials: { url: process.env.DATABASE_URL! },
+});",warning,https://orm.drizzle.team/docs/drizzle-kit-push
+14,Prepared Statements,"Use .prepare() for frequently executed queries","Prepare statements that run often to skip the query planning phase on subsequent executions. Use placeholder() for dynamic parameters.","Prepare hot-path queries; use placeholder for dynamic values","Dont prepare queries that run once; dont hardcode values in prepared statements","import { eq, placeholder } from 'drizzle-orm';
+import { db } from './db';
+import { users } from './schema';
+
+// Prepare a frequently used query
+const getUserById = db
+  .select()
+  .from(users)
+  .where(eq(users.id, placeholder('id')))
+  .prepare('get_user_by_id');
+
+const getUserByEmail = db
+  .select()
+  .from(users)
+  .where(eq(users.email, placeholder('email')))
+  .prepare('get_user_by_email');
+
+// Execute with parameters
+async function findUser(id: number) {
+  const [user] = await getUserById.execute({ id });
+  return user;
+}
+
+async function findByEmail(email: string) {
+  const [user] = await getUserByEmail.execute({ email });
+  return user;
+}","import { eq } from 'drizzle-orm';
+import { db } from './db';
+import { users } from './schema';
+
+// Bad: re-building the query on every call
+async function findUser(id: number) {
+  const [user] = await db
+    .select()
+    .from(users)
+    .where(eq(users.id, id));
+  return user;
+}
+
+// Bad: hardcoded value in a prepared statement
+const getAdmins = db.select().from(users).where(eq(users.role, 'admin')).prepare('get_admins');",info,https://orm.drizzle.team/docs/perf-queries
+15,Raw SQL,"Use the sql`` template literal for complex expressions","Use the sql tagged template for raw SQL expressions within Drizzle queries. This is useful for database functions, complex calculations, and features not yet covered by the query builder.","Use sql`` with typed generics; embed in select/where/orderBy","Dont use string interpolation for user input in sql``; dont bypass the query builder unnecessarily","import { sql, eq } from 'drizzle-orm';
+import { db } from './db';
+import { users, posts } from './schema';
+
+// Raw SQL in select
+const usersWithPostCount = await db
+  .select({
+    id: users.id,
+    name: users.name,
+    postCount: sql<number>`(SELECT count(*) FROM posts WHERE posts.author_id = ${users.id})`,
+    nameLower: sql<string>`lower(${users.name})`,
+  })
+  .from(users);
+
+// Raw SQL in where
+const recentUsers = await db
+  .select()
+  .from(users)
+  .where(sql`${users.createdAt} > now() - interval '30 days'`);
+
+// Typed raw query
+const result = await db.execute<{ count: number }>(
+  sql`SELECT count(*) as count FROM ${users}`
+);","import { db } from './db';
+
+// Bad: string interpolation — SQL injection risk
+const name = userInput;
+const result = await db.execute(
+  sql`SELECT * FROM users WHERE name = '${name}'`
+);
+
+// Bad: unnecessary raw SQL when query builder works
+const all = await db.execute(sql`SELECT * FROM users ORDER BY id ASC`);",error,https://orm.drizzle.team/docs/sql
+16,Aggregation,"Use count, sum, avg with groupBy for aggregate queries","Use Drizzle aggregate functions with .groupBy() for summarized data. Combine with .having() to filter aggregated results.","Use typed aggregate functions; combine groupBy with having","Dont aggregate in application code; dont forget groupBy with aggregate functions","import { sql, eq, gt } from 'drizzle-orm';
+import { db } from './db';
+import { orders, products } from './schema';
+
+// Aggregate with groupBy and having
+const topProducts = await db
+  .select({
+    productId: orders.productId,
+    productName: products.name,
+    totalSales: sql<number>`sum(${orders.amount})`.as('total_sales'),
+    orderCount: sql<number>`count(*)`.as('order_count'),
+    avgOrderValue: sql<number>`avg(${orders.amount})`.as('avg_order_value'),
+  })
+  .from(orders)
+  .innerJoin(products, eq(orders.productId, products.id))
+  .groupBy(orders.productId, products.name)
+  .having(gt(sql`count(*)`, 10))
+  .orderBy(sql`total_sales DESC`);","import { db } from './db';
+import { orders } from './schema';
+
+// Bad: fetching all rows and aggregating in JS
+const allOrders = await db.select().from(orders);
+const totalSales = allOrders.reduce((sum, o) => sum + o.amount, 0);
+const avgOrder = totalSales / allOrders.length;
+
+// Bad: aggregate without groupBy
+const broken = await db
+  .select({
+    productId: orders.productId,
+    total: sql`sum(${orders.amount})`,
+  })
+  .from(orders);",warning,https://orm.drizzle.team/docs/select#aggregations
+17,Pagination,"Use limit/offset or cursor-based pagination","Implement offset-based pagination for simple cases and cursor-based for large datasets. Cursor-based pagination avoids the performance issues of high offsets.","Use cursor-based pagination for large datasets; always limit results","Dont use high offsets on large tables; dont fetch all rows and paginate in JS","import { gt, asc, eq, desc } from 'drizzle-orm';
+import { db } from './db';
+import { posts } from './schema';
+
+// Offset-based pagination (simple, ok for small datasets)
+async function getPostsOffset(page: number, pageSize: number = 20) {
+  const results = await db
+    .select()
+    .from(posts)
+    .orderBy(asc(posts.id))
+    .limit(pageSize)
+    .offset((page - 1) * pageSize);
+  return results;
+}
+
+// Cursor-based pagination (efficient for large datasets)
+async function getPostsCursor(cursor: number | null, pageSize: number = 20) {
+  const query = db
+    .select()
+    .from(posts)
+    .orderBy(asc(posts.id))
+    .limit(pageSize + 1); // fetch one extra to check hasMore
+
+  const results = cursor
+    ? await query.where(gt(posts.id, cursor))
+    : await query;
+
+  const hasMore = results.length > pageSize;
+  const data = hasMore ? results.slice(0, -1) : results;
+  const nextCursor = hasMore ? data[data.length - 1].id : null;
+
+  return { data, nextCursor, hasMore };
+}","import { db } from './db';
+import { posts } from './schema';
+
+// Bad: fetch everything and slice in memory
+async function getPosts(page: number) {
+  const all = await db.select().from(posts);
+  return all.slice((page - 1) * 20, page * 20);
+}
+
+// Bad: high offset on large table — very slow
+async function getPostsPage(page: number) {
+  return db.select().from(posts).limit(20).offset(page * 1000000);
+}",warning,https://orm.drizzle.team/docs/select#limit--offset
+18,Ordering,"Use orderBy with asc/desc for sorted results","Apply ordering using the asc() and desc() helpers from drizzle-orm. Support multiple sort columns for deterministic ordering.","Use asc/desc helpers; include a unique column as tiebreaker","Dont rely on database default ordering; dont use raw SQL for simple ordering","import { asc, desc } from 'drizzle-orm';
+import { db } from './db';
+import { posts } from './schema';
+
+// Single column ordering
+const newestPosts = await db
+  .select()
+  .from(posts)
+  .orderBy(desc(posts.createdAt));
+
+// Multi-column ordering with tiebreaker
+const sortedPosts = await db
+  .select()
+  .from(posts)
+  .orderBy(desc(posts.publishedAt), asc(posts.id));
+
+// Dynamic ordering
+type SortField = 'title' | 'createdAt';
+type SortDir = 'asc' | 'desc';
+
+function getOrdered(field: SortField, dir: SortDir) {
+  const column = posts[field];
+  const orderFn = dir === 'asc' ? asc : desc;
+  return db.select().from(posts).orderBy(orderFn(column), asc(posts.id));
+}","import { db } from './db';
+import { posts } from './schema';
+
+// Bad: no ordering — results are non-deterministic
+const randomOrder = await db.select().from(posts);
+
+// Bad: raw SQL ordering
+const sorted = await db.execute(
+  `SELECT * FROM posts ORDER BY created_at DESC`
+);",info,https://orm.drizzle.team/docs/select#order-by
+19,Zod Integration,"Use drizzle-zod for automatic schema validation","Generate Zod schemas from your Drizzle table definitions using drizzle-zod. Use createInsertSchema and createSelectSchema for input validation and API response typing.","Use createInsertSchema for input validation; refine schemas with Zod methods","Dont write Zod schemas manually when drizzle-zod can generate them; dont skip validation","import { createInsertSchema, createSelectSchema } from 'drizzle-zod';
+import { z } from 'zod';
+import { users } from './schema';
+
+// Auto-generate schemas from table definition
+const insertUserSchema = createInsertSchema(users, {
+  email: z.string().email('Invalid email format'),
+  name: z.string().min(2, 'Name must be at least 2 characters').max(100),
+  age: z.number().int().min(0).max(150).optional(),
+});
+
+const selectUserSchema = createSelectSchema(users);
+
+// Use in API handler
+type InsertUser = z.infer<typeof insertUserSchema>;
+type SelectUser = z.infer<typeof selectUserSchema>;
+
+function validateUserInput(data: unknown): InsertUser {
+  return insertUserSchema.parse(data);
+}
+
+// Express route example
+app.post('/users', (req, res) => {
+  const parsed = insertUserSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ errors: parsed.error.flatten() });
+  }
+  // parsed.data is fully typed
+});","import { z } from 'zod';
+
+// Bad: manually duplicating schema definitions
+const userSchema = z.object({
+  email: z.string().email(),
+  name: z.string(),
+  age: z.number().optional(),
+});
+// This drifts from the actual database schema over time
+
+// Bad: no validation at all
+app.post('/users', async (req, res) => {
+  const user = await db.insert(users).values(req.body).returning();
+  res.json(user);
+});",warning,https://orm.drizzle.team/docs/zod
+20,Type Inference,"Use InferSelectModel and InferInsertModel for derived types","Derive TypeScript types directly from your Drizzle schema using InferSelectModel and InferInsertModel. Never manually define types that mirror your table schema.","Use InferSelectModel/InferInsertModel; derive types from the schema","Dont manually define types that duplicate the schema; dont use any for database results","import type { InferSelectModel, InferInsertModel } from 'drizzle-orm';
+import { users, posts } from './schema';
+
+// Derive types from schema — always in sync
+type User = InferSelectModel<typeof users>;
+type NewUser = InferInsertModel<typeof users>;
+type Post = InferSelectModel<typeof posts>;
+type NewPost = InferInsertModel<typeof posts>;
+
+// Use in function signatures
+async function getUserById(id: number): Promise<User | undefined> {
+  const [user] = await db
+    .select()
+    .from(users)
+    .where(eq(users.id, id));
+  return user;
+}
+
+async function createPost(data: NewPost): Promise<Post> {
+  const [post] = await db
+    .insert(posts)
+    .values(data)
+    .returning();
+  return post;
+}","// Bad: manually defining types that duplicate the schema
+interface User {
+  id: number;
+  email: string;
+  name: string;
+  age: number | null;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+// Bad: using any
+async function getUser(id: number): Promise<any> {
+  return db.select().from(users).where(eq(users.id, id));
+}",warning,https://orm.drizzle.team/docs/goodies#type-api
+21,Connection Pool,"Configure pg Pool with proper limits and timeouts","Set appropriate connection pool size based on your environment. Configure idle timeout and connection timeout to handle failures gracefully. Always close the pool on shutdown.","Set max connections based on environment; handle pool shutdown gracefully","Dont use unlimited connections; dont skip error handling on the pool","import { Pool } from 'pg';
+import { drizzle } from 'drizzle-orm/node-postgres';
+import * as schema from './schema';
+
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  max: parseInt(process.env.DB_POOL_MAX || '20'),
+  min: parseInt(process.env.DB_POOL_MIN || '5'),
+  idleTimeoutMillis: 30000,
+  connectionTimeoutMillis: 5000,
+  allowExitOnIdle: false,
+});
+
+pool.on('error', (err) => {
+  console.error('Unexpected pool error:', err);
+});
+
+export const db = drizzle(pool, { schema });
+
+// Graceful shutdown
+async function shutdown() {
+  console.log('Closing database pool...');
+  await pool.end();
+  process.exit(0);
+}
+
+process.on('SIGTERM', shutdown);
+process.on('SIGINT', shutdown);","import { Client } from 'pg';
+import { drizzle } from 'drizzle-orm/node-postgres';
+
+// Bad: single client connection, no pooling
+const client = new Client(process.env.DATABASE_URL);
+client.connect();
+export const db = drizzle(client);
+
+// Bad: no error handling, no shutdown, no limits
+const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+export const db2 = drizzle(pool);",error,https://orm.drizzle.team/docs/get-started-postgresql
+22,Batch Insert,"Use db.insert().values([...]) for efficient bulk inserts","Insert multiple rows in a single query by passing an array to .values(). For very large datasets chunk the inserts to avoid exceeding query parameter limits.","Batch inserts with array values; chunk large datasets","Dont insert rows one at a time in a loop; dont pass unbounded arrays","import { db } from './db';
+import { products } from './schema';
+import type { InferInsertModel } from 'drizzle-orm';
+
+type NewProduct = InferInsertModel<typeof products>;
+
+// Batch insert with chunking for large datasets
+async function batchInsertProducts(items: NewProduct[]) {
+  const CHUNK_SIZE = 1000;
+  const results = [];
+
+  for (let i = 0; i < items.length; i += CHUNK_SIZE) {
+    const chunk = items.slice(i, i + CHUNK_SIZE);
+    const inserted = await db
+      .insert(products)
+      .values(chunk)
+      .returning();
+    results.push(...inserted);
+  }
+
+  return results;
+}
+
+// Simple batch insert
+const newProducts: NewProduct[] = [
+  { name: 'Widget A', price: 9.99, sku: 'WA-001' },
+  { name: 'Widget B', price: 19.99, sku: 'WB-001' },
+  { name: 'Widget C', price: 29.99, sku: 'WC-001' },
+];
+
+const inserted = await db.insert(products).values(newProducts).returning();","import { db } from './db';
+import { products } from './schema';
+
+// Bad: inserting one by one in a loop — N queries
+async function insertProducts(items: any[]) {
+  for (const item of items) {
+    await db.insert(products).values(item);
+  }
+}
+
+// Bad: no chunking on huge dataset — may exceed parameter limits
+async function insertAll(items: any[]) {
+  await db.insert(products).values(items); // 100k rows at once
+}",warning,https://orm.drizzle.team/docs/insert
+23,Upsert,"Use onConflictDoUpdate for insert-or-update patterns","Use .onConflictDoUpdate() to handle unique constraint conflicts gracefully. Specify the conflict target and the columns to update on conflict.","Use onConflictDoUpdate with explicit target; update only necessary columns","Dont catch unique constraint errors manually; dont use onConflictDoNothing when you need updates","import { eq, sql } from 'drizzle-orm';
+import { db } from './db';
+import { products } from './schema';
+
+// Upsert: insert or update on conflict
+async function upsertProduct(sku: string, name: string, price: number) {
+  const [result] = await db
+    .insert(products)
+    .values({ sku, name, price, updatedAt: new Date() })
+    .onConflictDoUpdate({
+      target: products.sku,
+      set: {
+        name,
+        price,
+        updatedAt: new Date(),
+      },
+    })
+    .returning();
+
+  return result;
+}
+
+// Batch upsert
+async function syncProducts(items: { sku: string; name: string; price: number }[]) {
+  return db
+    .insert(products)
+    .values(items.map((i) => ({ ...i, updatedAt: new Date() })))
+    .onConflictDoUpdate({
+      target: products.sku,
+      set: {
+        name: sql`excluded.name`,
+        price: sql`excluded.price`,
+        updatedAt: new Date(),
+      },
+    })
+    .returning();
+}","import { db } from './db';
+import { products } from './schema';
+
+// Bad: check-then-insert race condition
+async function upsertProduct(sku: string, name: string, price: number) {
+  const existing = await db.select().from(products).where(eq(products.sku, sku));
+  if (existing.length > 0) {
+    await db.update(products).set({ name, price }).where(eq(products.sku, sku));
+  } else {
+    await db.insert(products).values({ sku, name, price });
+  }
+}
+
+// Bad: using try/catch for conflict handling
+async function insertProduct(data: any) {
+  try {
+    await db.insert(products).values(data);
+  } catch (e: any) {
+    if (e.code === '23505') {
+      await db.update(products).set(data).where(eq(products.sku, data.sku));
+    }
+  }
+}",error,https://orm.drizzle.team/docs/insert#on-conflict-do-update
+24,Testing,"Use in-memory SQLite or test containers for database tests","Test your Drizzle queries against a real database. Use SQLite in-memory for fast unit tests and PostgreSQL test containers for integration tests. Apply migrations before each test suite.","Use real database for tests; isolate test data with transactions","Dont mock the database layer; dont run tests against production data","import { drizzle } from 'drizzle-orm/better-sqlite3';
+import { migrate } from 'drizzle-orm/better-sqlite3/migrator';
+import Database from 'better-sqlite3';
+import { beforeEach, describe, it, expect } from 'vitest';
+import * as schema from './schema';
+
+describe('User repository', () => {
+  let db: ReturnType<typeof drizzle>;
+
+  beforeEach(() => {
+    const sqlite = new Database(':memory:');
+    db = drizzle(sqlite, { schema });
+    migrate(db, { migrationsFolder: './drizzle/migrations' });
+  });
+
+  it('should create and retrieve a user', async () => {
+    const [user] = await db
+      .insert(schema.users)
+      .values({ email: 'test@example.com', name: 'Test User' })
+      .returning();
+
+    expect(user.email).toBe('test@example.com');
+
+    const [found] = await db
+      .select()
+      .from(schema.users)
+      .where(eq(schema.users.id, user.id));
+
+    expect(found.name).toBe('Test User');
+  });
+});","import { describe, it, expect, vi } from 'vitest';
+
+// Bad: mocking the entire database — tests nothing real
+const mockDb = {
+  select: vi.fn().mockReturnValue({
+    from: vi.fn().mockReturnValue({
+      where: vi.fn().mockResolvedValue([{ id: 1, name: 'Test' }]),
+    }),
+  }),
+};
+
+describe('User repository', () => {
+  it('should find user', async () => {
+    // This test passes but proves nothing about real queries
+    const result = await mockDb.select().from('users').where('id = 1');
+    expect(result[0].name).toBe('Test');
+  });
+});",warning,https://orm.drizzle.team/docs/get-started-sqlite
+25,Performance,"Choose query builder vs raw SQL based on query complexity","Use the Drizzle query builder for standard CRUD operations and switch to raw sql`` for performance-critical or highly complex queries. Monitor slow queries and use EXPLAIN ANALYZE.","Profile queries with EXPLAIN ANALYZE; use query builder first then optimize","Dont prematurely optimize with raw SQL; dont ignore slow query logs","import { sql, eq } from 'drizzle-orm';
+import { db } from './db';
+import { users, orders } from './schema';
+
+// Good: query builder for standard operations
+const user = await db.select().from(users).where(eq(users.id, 1));
+
+// Good: raw SQL for performance-critical complex queries
+const dashboardStats = await db.execute<{
+  totalUsers: number;
+  activeUsers: number;
+  revenue: number;
+}>(sql`
+  SELECT
+    (SELECT count(*) FROM users) as ""totalUsers"",
+    (SELECT count(*) FROM users WHERE last_active > now() - interval '30 days') as ""activeUsers"",
+    (SELECT coalesce(sum(amount), 0) FROM orders WHERE created_at > now() - interval '30 days') as ""revenue""
+`);
+
+// Good: analyze slow queries
+const explainResult = await db.execute(sql`
+  EXPLAIN ANALYZE
+  SELECT u.*, count(o.id) as order_count
+  FROM users u
+  LEFT JOIN orders o ON u.id = o.user_id
+  GROUP BY u.id
+  ORDER BY order_count DESC
+  LIMIT 100
+`);
+console.log('Query plan:', explainResult);","import { db } from './db';
+import { users, orders } from './schema';
+
+// Bad: always using raw SQL — loses type safety
+const user = await db.execute(sql`SELECT * FROM users WHERE id = ${id}`);
+
+// Bad: fetching everything and processing in JS
+const allOrders = await db.select().from(orders);
+const stats = {
+  total: allOrders.length,
+  revenue: allOrders.reduce((sum, o) => sum + o.amount, 0),
+  avg: allOrders.reduce((sum, o) => sum + o.amount, 0) / allOrders.length,
+};",info,https://orm.drizzle.team/docs/perf-queries

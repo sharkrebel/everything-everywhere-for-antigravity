@@ -38,6 +38,11 @@ Whether you are scaffolding a new app, launching virtual devices, running fast i
 - Search authoritative, up-to-date Android developer documentation directly from the CLI via `android docs search "<query>"`.
 - Fetch full articles and migration guides using `android docs fetch kb://...`.
 
+### 🖥️ Device Hub & Compose Preview Panes
+- **Android Device Hub**: list, start, stop, create, and remove Android Virtual Devices, and mirror and control emulators and physical devices connected to adb, in a side pane.
+- **Android Compose Preview**: render Jetpack Compose `@Preview` functions with `android preview` and review the results in a side pane.
+- Both panes are served by the Android CLI (`android sidecar run <name>`), which downloads their implementation on first use.
+
 ---
 
 ## 📦 Installation & Setup

@@ -1,0 +1,1834 @@
+No,Category,Guideline,Description,Do,Dont,Code Good,Code Bad,Severity,Docs URL
+1,Socket.io Server Setup,Initialize Socket.io server with an HTTP server,"Create a Socket.io server by attaching it to an existing HTTP server. Configure CORS and connection settings properly for production use.",Attach Socket.io to an HTTP server with explicit CORS configuration,Use Socket.io standalone without CORS config or let it create its own HTTP server,"import { createServer } from 'http';
+import express from 'express';
+import { Server } from 'socket.io';
+
+const app = express();
+const httpServer = createServer(app);
+
+const io = new Server(httpServer, {
+  cors: {
+    origin: process.env.CLIENT_URL || 'http://localhost:3000',
+    methods: ['GET', 'POST'],
+    credentials: true,
+  },
+  pingTimeout: 60000,
+  pingInterval: 25000,
+  transports: ['websocket', 'polling'],
+});
+
+io.on('connection', (socket) => {
+  console.log(`Client connected: ${socket.id}`);
+
+  socket.on('disconnect', (reason) => {
+    console.log(`Client disconnected: ${socket.id}, reason: ${reason}`);
+  });
+});
+
+const PORT = process.env.PORT || 3000;
+httpServer.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+});","import { Server } from 'socket.io';
+
+// BAD: No CORS config, no HTTP server reference, default settings
+const io = new Server(3000); // BAD: creates its own server
+
+io.on('connection', (socket) => {
+  console.log('connected');
+  // BAD: No disconnect handler
+  // BAD: No ping/pong configuration
+  // BAD: No CORS - will fail in production
+});",warning,https://socket.io/docs/v4/server-initialization/
+2,Socket.io Client Connection,Connect client to Socket.io server properly,"Initialize the Socket.io client with proper connection options including auth tokens, reconnection settings, and transport preferences.",Configure reconnection strategy and pass auth tokens via the auth option,Pass tokens in query parameters or skip reconnection configuration,"import { io, Socket } from 'socket.io-client';
+
+interface ServerToClientEvents {
+  message: (data: { user: string; text: string; timestamp: number }) => void;
+  error: (error: { code: string; message: string }) => void;
+}
+
+interface ClientToServerEvents {
+  sendMessage: (data: { text: string; room: string }) => void;
+  joinRoom: (room: string) => void;
+}
+
+const socket: Socket<ServerToClientEvents, ClientToServerEvents> = io(
+  process.env.NEXT_PUBLIC_WS_URL || 'http://localhost:3000',
+  {
+    auth: {
+      token: localStorage.getItem('accessToken'),
+    },
+    reconnection: true,
+    reconnectionAttempts: 5,
+    reconnectionDelay: 1000,
+    reconnectionDelayMax: 10000,
+    transports: ['websocket', 'polling'],
+    autoConnect: false,
+  }
+);
+
+socket.on('connect', () => {
+  console.log('Connected:', socket.id);
+});
+
+socket.on('connect_error', (err) => {
+  console.error('Connection error:', err.message);
+  if (err.message === 'Authentication error') {
+    // Refresh token and retry
+    refreshAuthToken().then((newToken) => {
+      socket.auth = { token: newToken };
+      socket.connect();
+    });
+  }
+});
+
+// Connect when ready
+socket.connect();","import { io } from 'socket.io-client';
+
+// BAD: Token in query string (logged in server logs), no type safety
+const socket = io('http://localhost:3000', {
+  query: { token: localStorage.getItem('token') }, // BAD: token in URL
+  // No reconnection config
+  // No transport preference
+  // No type safety
+});
+
+socket.on('connect', () => {
+  console.log('connected');
+});
+
+// BAD: No connect_error handler
+// BAD: No token refresh logic",warning,https://socket.io/docs/v4/client-initialization/
+3,Socket.io Events,Define and handle custom events with type safety,"Create typed custom events for Socket.io communication. Use interface declarations to ensure type safety between client and server.",Define shared event interfaces and use typed socket instances,Use untyped event names with any payloads,"// shared/types.ts - shared between client and server
+export interface ServerToClientEvents {
+  'chat:message': (data: ChatMessage) => void;
+  'chat:userJoined': (data: { userId: string; username: string }) => void;
+  'chat:userLeft': (data: { userId: string }) => void;
+  'chat:typing': (data: { userId: string; isTyping: boolean }) => void;
+}
+
+export interface ClientToServerEvents {
+  'chat:send': (data: { text: string; roomId: string }, ack: (response: { id: string }) => void) => void;
+  'chat:typing': (data: { roomId: string; isTyping: boolean }) => void;
+}
+
+export interface ChatMessage {
+  id: string;
+  userId: string;
+  username: string;
+  text: string;
+  roomId: string;
+  timestamp: number;
+}
+
+// server.ts
+import { Server } from 'socket.io';
+
+const io = new Server<ClientToServerEvents, ServerToClientEvents>(httpServer);
+
+io.on('connection', (socket) => {
+  socket.on('chat:send', async (data, ack) => {
+    const message: ChatMessage = {
+      id: crypto.randomUUID(),
+      userId: socket.data.userId,
+      username: socket.data.username,
+      text: data.text,
+      roomId: data.roomId,
+      timestamp: Date.now(),
+    };
+
+    await db.message.create({ data: message });
+    io.to(data.roomId).emit('chat:message', message);
+    ack({ id: message.id });
+  });
+});","import { Server } from 'socket.io';
+
+// BAD: No type safety, magic strings everywhere
+const io = new Server(httpServer);
+
+io.on('connection', (socket) => {
+  // BAD: untyped events, no validation
+  socket.on('msg', (data: any) => {
+    // BAD: no validation of data shape
+    io.emit('msg', data); // BAD: broadcasting to everyone, including sender
+    // BAD: no acknowledgment, no error handling
+  });
+
+  socket.on('type', (d: any) => {
+    socket.broadcast.emit('type', d); // BAD: no room scoping
+  });
+});",warning,https://socket.io/docs/v4/typescript/
+4,Socket.io Rooms,Manage rooms for group communication,"Use Socket.io rooms to organize clients into groups for targeted message delivery. Handle join and leave operations with proper authorization.",Validate room access before joining and clean up on disconnect,Allow unrestricted room access or forget to handle room cleanup,"import { Server, Socket } from 'socket.io';
+
+interface RoomJoinPayload {
+  roomId: string;
+}
+
+async function canAccessRoom(userId: string, roomId: string): Promise<boolean> {
+  const membership = await db.roomMember.findUnique({
+    where: { userId_roomId: { userId, roomId } },
+  });
+  return !!membership;
+}
+
+io.on('connection', (socket: Socket) => {
+  const userId = socket.data.userId;
+
+  socket.on('room:join', async (payload: RoomJoinPayload, ack) => {
+    const { roomId } = payload;
+
+    if (!await canAccessRoom(userId, roomId)) {
+      return ack({ error: 'Access denied' });
+    }
+
+    await socket.join(roomId);
+
+    const members = await io.in(roomId).fetchSockets();
+    const memberIds = members.map((s) => s.data.userId);
+
+    socket.to(roomId).emit('room:userJoined', { userId, roomId });
+    ack({ success: true, members: memberIds });
+  });
+
+  socket.on('room:leave', async (payload: RoomJoinPayload) => {
+    const { roomId } = payload;
+    await socket.leave(roomId);
+    socket.to(roomId).emit('room:userLeft', { userId, roomId });
+  });
+
+  socket.on('disconnecting', () => {
+    for (const room of socket.rooms) {
+      if (room !== socket.id) {
+        socket.to(room).emit('room:userLeft', { userId, roomId: room });
+      }
+    }
+  });
+});","import { Server } from 'socket.io';
+
+const io = new Server(httpServer);
+
+io.on('connection', (socket) => {
+  // BAD: No authorization check before joining
+  socket.on('joinRoom', (room: string) => {
+    socket.join(room); // BAD: anyone can join any room
+    // BAD: no notification to other room members
+  });
+
+  // BAD: No cleanup on disconnect
+  // BAD: No room membership validation
+  socket.on('message', (data: any) => {
+    io.to(data.room).emit('message', data); // BAD: no sender validation
+  });
+});",error,https://socket.io/docs/v4/rooms/
+5,Socket.io Namespaces,Use namespaces to separate concerns,"Create Socket.io namespaces to logically separate different features like chat, notifications, and analytics. Each namespace can have its own middleware and event handlers.",Create separate namespaces for distinct features with their own middleware,Put all events in the default namespace as the application grows,"import { Server } from 'socket.io';
+
+const io = new Server(httpServer, {
+  cors: { origin: process.env.CLIENT_URL, credentials: true },
+});
+
+// Chat namespace
+const chatNamespace = io.of('/chat');
+chatNamespace.use(authMiddleware);
+chatNamespace.on('connection', (socket) => {
+  console.log(`Chat connected: ${socket.data.userId}`);
+
+  socket.on('message', async (data) => {
+    const message = await saveChatMessage(socket.data.userId, data);
+    chatNamespace.to(data.roomId).emit('message', message);
+  });
+});
+
+// Notifications namespace
+const notifNamespace = io.of('/notifications');
+notifNamespace.use(authMiddleware);
+notifNamespace.on('connection', (socket) => {
+  const userId = socket.data.userId;
+  socket.join(`user:${userId}`);
+
+  socket.on('markRead', async (notifId: string) => {
+    await db.notification.update({ where: { id: notifId }, data: { read: true } });
+  });
+});
+
+// Send notification from anywhere in the app
+export function sendNotification(userId: string, notification: any) {
+  notifNamespace.to(`user:${userId}`).emit('notification', notification);
+}
+
+// Analytics namespace (read-only for admins)
+const analyticsNamespace = io.of('/analytics');
+analyticsNamespace.use(adminAuthMiddleware);
+analyticsNamespace.on('connection', (socket) => {
+  const interval = setInterval(() => {
+    socket.emit('stats', getRealtimeStats());
+  }, 5000);
+
+  socket.on('disconnect', () => clearInterval(interval));
+});","import { Server } from 'socket.io';
+
+const io = new Server(httpServer);
+
+// BAD: Everything in the default namespace
+io.on('connection', (socket) => {
+  // BAD: All features mixed together, hard to maintain
+  socket.on('chatMessage', (data) => { /* ... */ });
+  socket.on('notification', (data) => { /* ... */ });
+  socket.on('analytics', (data) => { /* ... */ });
+  socket.on('typing', (data) => { /* ... */ });
+  socket.on('presence', (data) => { /* ... */ });
+  // BAD: No separation of middleware per feature
+  // BAD: All clients receive all events even if irrelevant
+});",info,https://socket.io/docs/v4/namespaces/
+6,Socket.io Auth Middleware,Authenticate connections with io.use() middleware,"Use Socket.io middleware to authenticate connections before they complete. Verify JWT tokens or session cookies and attach user data to the socket.",Verify auth tokens in the middleware and reject unauthenticated connections,Skip authentication or authenticate only on individual events,"import { Server, Socket } from 'socket.io';
+import jwt from 'jsonwebtoken';
+
+interface AuthSocket extends Socket {
+  data: {
+    userId: string;
+    role: string;
+  };
+}
+
+function authMiddleware(socket: Socket, next: (err?: Error) => void) {
+  const token = socket.handshake.auth.token;
+
+  if (!token) {
+    return next(new Error('Authentication required'));
+  }
+
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET!) as {
+      sub: string;
+      role: string;
+    };
+
+    socket.data.userId = decoded.sub;
+    socket.data.role = decoded.role;
+    next();
+  } catch (err) {
+    if (err instanceof jwt.TokenExpiredError) {
+      return next(new Error('Token expired'));
+    }
+    next(new Error('Authentication failed'));
+  }
+}
+
+const io = new Server(httpServer);
+
+// Apply to all connections
+io.use(authMiddleware);
+
+// Or apply to specific namespace
+io.of('/admin').use(authMiddleware);
+io.of('/admin').use((socket, next) => {
+  if (socket.data.role !== 'admin') {
+    return next(new Error('Admin access required'));
+  }
+  next();
+});
+
+io.on('connection', (socket: AuthSocket) => {
+  console.log(`Authenticated user: ${socket.data.userId}`);
+});","import { Server } from 'socket.io';
+
+const io = new Server(httpServer);
+
+// BAD: No middleware, authenticating per-event
+io.on('connection', (socket) => {
+  // BAD: Connection is already established without auth
+  socket.on('authenticate', async (token: string) => {
+    // BAD: Client can use socket before authenticating
+    try {
+      const user = jwt.verify(token, 'secret');
+      (socket as any).user = user;
+    } catch {
+      socket.disconnect(); // BAD: already connected, could have sent messages
+    }
+  });
+
+  socket.on('message', (data) => {
+    // BAD: No guarantee user is authenticated
+    io.emit('message', data);
+  });
+});",error,https://socket.io/docs/v4/middlewares/
+7,Socket.io Redis Adapter,Scale Socket.io with Redis adapter,"Use the Redis adapter to enable Socket.io to work across multiple server instances. Redis pub/sub ensures events are broadcast to all connected servers.",Use @socket.io/redis-adapter for multi-instance deployments,Use Socket.io without an adapter in a multi-instance deployment,"import { createServer } from 'http';
+import { Server } from 'socket.io';
+import { createAdapter } from '@socket.io/redis-adapter';
+import { createClient } from 'redis';
+
+const httpServer = createServer();
+
+const io = new Server(httpServer, {
+  cors: { origin: process.env.CLIENT_URL, credentials: true },
+});
+
+async function setupRedisAdapter() {
+  const pubClient = createClient({ url: process.env.REDIS_URL });
+  const subClient = pubClient.duplicate();
+
+  pubClient.on('error', (err) => console.error('Redis pub error:', err));
+  subClient.on('error', (err) => console.error('Redis sub error:', err));
+
+  await Promise.all([pubClient.connect(), subClient.connect()]);
+
+  io.adapter(createAdapter(pubClient, subClient));
+  console.log('Socket.io Redis adapter connected');
+}
+
+await setupRedisAdapter();
+
+io.on('connection', (socket) => {
+  // Events will now be broadcast across all server instances
+  socket.on('chat:message', (data) => {
+    io.to(data.roomId).emit('chat:message', data);
+    // This reaches clients connected to ANY server instance
+  });
+});
+
+httpServer.listen(3000);","import { Server } from 'socket.io';
+
+// BAD: No adapter in a load-balanced environment
+const io = new Server(httpServer);
+
+io.on('connection', (socket) => {
+  socket.on('chat:message', (data) => {
+    // BAD: Only reaches clients on THIS server instance
+    // Clients on other instances behind the load balancer won't receive this
+    io.to(data.roomId).emit('chat:message', data);
+  });
+});
+
+// BAD: Sticky sessions without adapter - rooms don't work across instances
+// BAD: No error handling for Redis connection",error,https://socket.io/docs/v4/redis-adapter/
+8,ws (Raw WebSocket) Setup,Initialize a raw WebSocket server with ws,"Set up a WebSocket server using the ws library for lightweight WebSocket communication without the Socket.io overhead. Attach it to an existing HTTP server.",Attach WebSocketServer to an existing HTTP server and handle errors on each connection,Create a standalone WebSocket server without error handling,"import { WebSocketServer, WebSocket } from 'ws';
+import { createServer } from 'http';
+import express from 'express';
+
+const app = express();
+const server = createServer(app);
+
+const wss = new WebSocketServer({
+  server,
+  path: '/ws',
+  maxPayload: 1024 * 1024, // 1MB max message size
+  clientTracking: true,
+});
+
+wss.on('connection', (ws: WebSocket, req) => {
+  const clientIp = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
+  console.log(`WebSocket connected from ${clientIp}`);
+
+  ws.on('message', (data: Buffer) => {
+    try {
+      const message = JSON.parse(data.toString());
+      handleMessage(ws, message);
+    } catch (err) {
+      ws.send(JSON.stringify({ error: 'Invalid message format' }));
+    }
+  });
+
+  ws.on('error', (err) => {
+    console.error('WebSocket error:', err);
+  });
+
+  ws.on('close', (code, reason) => {
+    console.log(`WebSocket closed: ${code} ${reason.toString()}`);
+  });
+
+  ws.send(JSON.stringify({ type: 'connected', timestamp: Date.now() }));
+});
+
+wss.on('error', (err) => {
+  console.error('WebSocketServer error:', err);
+});
+
+server.listen(3000);","import { WebSocketServer } from 'ws';
+
+// BAD: Standalone server, no error handling, no payload limit
+const wss = new WebSocketServer({ port: 8080 }); // BAD: creates its own server
+
+wss.on('connection', (ws) => {
+  ws.on('message', (data) => {
+    // BAD: No try/catch, no message validation
+    const msg = JSON.parse(data.toString());
+    // BAD: No error event handler - will crash on error
+    ws.send(msg);
+  });
+  // BAD: No close handler, no error handler
+});",warning,https://www.npmjs.com/package/ws
+9,ws Message Protocol,Define a JSON message protocol for WebSocket communication,"Create a structured message protocol with type fields for routing different message types. Validate incoming messages against the protocol schema.",Define a typed message protocol with validation and route messages by type,Send unstructured data or use string-based protocols without validation,"import { WebSocket } from 'ws';
+import { z } from 'zod';
+
+// Define message schemas
+const MessageSchema = z.discriminatedUnion('type', [
+  z.object({ type: z.literal('chat:send'), payload: z.object({ roomId: z.string(), text: z.string().min(1).max(2000) }) }),
+  z.object({ type: z.literal('room:join'), payload: z.object({ roomId: z.string() }) }),
+  z.object({ type: z.literal('room:leave'), payload: z.object({ roomId: z.string() }) }),
+  z.object({ type: z.literal('typing'), payload: z.object({ roomId: z.string(), isTyping: z.boolean() }) }),
+]);
+
+type IncomingMessage = z.infer<typeof MessageSchema>;
+
+interface OutgoingMessage {
+  type: string;
+  payload: unknown;
+  timestamp: number;
+}
+
+function sendMessage(ws: WebSocket, type: string, payload: unknown): void {
+  if (ws.readyState === WebSocket.OPEN) {
+    const message: OutgoingMessage = { type, payload, timestamp: Date.now() };
+    ws.send(JSON.stringify(message));
+  }
+}
+
+type MessageHandler = (ws: WebSocket, payload: any) => void | Promise<void>;
+const handlers = new Map<string, MessageHandler>();
+
+handlers.set('chat:send', async (ws, payload) => {
+  const message = await saveChatMessage(payload);
+  broadcastToRoom(payload.roomId, 'chat:message', message);
+});
+
+handlers.set('room:join', async (ws, payload) => {
+  await joinRoom(ws, payload.roomId);
+  sendMessage(ws, 'room:joined', { roomId: payload.roomId });
+});
+
+function handleIncomingMessage(ws: WebSocket, raw: Buffer): void {
+  try {
+    const data = JSON.parse(raw.toString());
+    const parsed = MessageSchema.parse(data);
+    const handler = handlers.get(parsed.type);
+    if (handler) {
+      handler(ws, parsed.payload);
+    } else {
+      sendMessage(ws, 'error', { message: `Unknown message type: ${parsed.type}` });
+    }
+  } catch (err) {
+    if (err instanceof z.ZodError) {
+      sendMessage(ws, 'error', { message: 'Invalid message format', details: err.errors });
+    } else {
+      sendMessage(ws, 'error', { message: 'Failed to process message' });
+    }
+  }
+}","import { WebSocket } from 'ws';
+
+// BAD: No protocol, no validation, no message routing
+wss.on('connection', (ws) => {
+  ws.on('message', (data) => {
+    const msg = JSON.parse(data.toString()); // BAD: no try/catch
+
+    // BAD: Giant if/else chain with no validation
+    if (msg.action === 'send') {
+      ws.send(msg.text); // BAD: no structure, no type field
+    } else if (msg.action === 'join') {
+      // BAD: no validation of msg.room
+    }
+    // BAD: no default case for unknown messages
+  });
+});",warning,https://www.npmjs.com/package/ws
+10,ws Authentication,Authenticate WebSocket connections on upgrade,"Verify authentication during the HTTP upgrade request before the WebSocket connection is established. Reject unauthorized connections at the protocol level.",Verify tokens in the upgrade event handler before completing the WebSocket handshake,Accept all connections and authenticate after the WebSocket is established,"import { WebSocketServer, WebSocket } from 'ws';
+import { createServer, IncomingMessage } from 'http';
+import jwt from 'jsonwebtoken';
+import { parse as parseUrl } from 'url';
+
+const server = createServer();
+const wss = new WebSocketServer({ noServer: true });
+
+interface AuthenticatedSocket extends WebSocket {
+  userId: string;
+  role: string;
+}
+
+server.on('upgrade', (request: IncomingMessage, socket, head) => {
+  try {
+    // Extract token from query string or cookie
+    const { query } = parseUrl(request.url || '', true);
+    const token = query.token as string
+      || request.headers.cookie?.match(/token=([^;]+)/)?.[1];
+
+    if (!token) {
+      socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
+      socket.destroy();
+      return;
+    }
+
+    const decoded = jwt.verify(token, process.env.JWT_SECRET!) as {
+      sub: string;
+      role: string;
+    };
+
+    wss.handleUpgrade(request, socket, head, (ws) => {
+      (ws as AuthenticatedSocket).userId = decoded.sub;
+      (ws as AuthenticatedSocket).role = decoded.role;
+      wss.emit('connection', ws, request);
+    });
+  } catch (err) {
+    socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
+    socket.destroy();
+  }
+});
+
+wss.on('connection', (ws: AuthenticatedSocket) => {
+  console.log(`Authenticated: ${ws.userId}`);
+});
+
+server.listen(3000);","import { WebSocketServer } from 'ws';
+
+// BAD: No authentication on upgrade
+const wss = new WebSocketServer({ port: 8080 });
+
+wss.on('connection', (ws) => {
+  // BAD: Connection already established without auth
+  let authenticated = false;
+
+  ws.on('message', (data) => {
+    const msg = JSON.parse(data.toString());
+
+    if (msg.type === 'auth') {
+      // BAD: Client can send messages before authenticating
+      authenticated = true;
+    }
+
+    if (!authenticated) {
+      ws.send('Please authenticate first');
+      return; // BAD: connection stays open
+    }
+  });
+});",error,https://www.npmjs.com/package/ws
+11,ws Heartbeat,Implement ping/pong heartbeat for connection health,"Use WebSocket ping/pong frames to detect stale connections. Terminate connections that fail to respond within the timeout period.",Implement server-side ping with client pong detection and cleanup stale connections,Rely on TCP keepalive alone or skip heartbeat implementation,"import { WebSocketServer, WebSocket } from 'ws';
+
+interface HeartbeatSocket extends WebSocket {
+  isAlive: boolean;
+  userId: string;
+}
+
+const wss = new WebSocketServer({ server });
+
+wss.on('connection', (ws: HeartbeatSocket) => {
+  ws.isAlive = true;
+
+  ws.on('pong', () => {
+    ws.isAlive = true;
+  });
+
+  ws.on('error', (err) => {
+    console.error('WebSocket error:', err);
+  });
+});
+
+// Heartbeat interval - check every 30 seconds
+const heartbeatInterval = setInterval(() => {
+  for (const client of wss.clients) {
+    const ws = client as HeartbeatSocket;
+
+    if (!ws.isAlive) {
+      console.log(`Terminating stale connection: ${ws.userId}`);
+      ws.terminate();
+      continue;
+    }
+
+    ws.isAlive = false;
+    ws.ping();
+  }
+}, 30000);
+
+wss.on('close', () => {
+  clearInterval(heartbeatInterval);
+});
+
+// Graceful shutdown
+process.on('SIGTERM', () => {
+  clearInterval(heartbeatInterval);
+  wss.close(() => {
+    server.close();
+  });
+});","import { WebSocketServer } from 'ws';
+
+const wss = new WebSocketServer({ port: 8080 });
+
+// BAD: No heartbeat - stale connections accumulate
+wss.on('connection', (ws) => {
+  // BAD: No ping/pong mechanism
+  // BAD: Dead connections stay open consuming resources
+  // BAD: No way to detect client disconnection
+  ws.on('message', (data) => {
+    // If client silently disconnects, this handler stays registered
+    // and the connection object stays in memory
+  });
+});
+
+// BAD: No cleanup interval
+// BAD: No graceful shutdown",warning,https://www.npmjs.com/package/ws
+12,Server-Sent Events (SSE),Implement SSE with proper headers and streaming,"Use Server-Sent Events for server-to-client streaming. Set the correct Content-Type header and use the SSE message format with data, event, and id fields.",Set Content-Type to text/event-stream and use proper SSE formatting with event IDs,Use SSE for bidirectional communication or skip proper header configuration,"import express from 'express';
+
+interface SSEClient {
+  id: string;
+  userId: string;
+  res: express.Response;
+}
+
+const clients = new Map<string, SSEClient>();
+
+function sendSSEEvent(res: express.Response, event: string, data: unknown, id?: string): void {
+  if (id) res.write(`id: ${id}\n`);
+  res.write(`event: ${event}\n`);
+  res.write(`data: ${JSON.stringify(data)}\n\n`);
+}
+
+app.get('/api/events', authenticateToken, (req: any, res) => {
+  const clientId = crypto.randomUUID();
+
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache',
+    Connection: 'keep-alive',
+    'X-Accel-Buffering': 'no', // Disable nginx buffering
+  });
+
+  // Send initial connection event
+  sendSSEEvent(res, 'connected', { clientId });
+
+  // Register client
+  clients.set(clientId, { id: clientId, userId: req.user.sub, res });
+
+  // Keep alive with comments every 30s
+  const keepAlive = setInterval(() => {
+    res.write(': keepalive\n\n');
+  }, 30000);
+
+  // Cleanup on close
+  req.on('close', () => {
+    clearInterval(keepAlive);
+    clients.delete(clientId);
+  });
+});
+
+// Broadcast to specific user
+function notifyUser(userId: string, event: string, data: unknown): void {
+  for (const client of clients.values()) {
+    if (client.userId === userId) {
+      sendSSEEvent(client.res, event, data, crypto.randomUUID());
+    }
+  }
+}","import express from 'express';
+
+// BAD: Wrong headers, no keepalive, no cleanup
+app.get('/events', (req, res) => {
+  // BAD: Missing Content-Type header
+  // BAD: Missing Cache-Control
+  res.setHeader('Content-Type', 'application/json'); // WRONG type
+
+  // BAD: Wrong SSE format
+  res.write(JSON.stringify({ event: 'message', data: 'hello' }));
+  // Should be: res.write('event: message\ndata: hello\n\n');
+
+  // BAD: No keepalive - connection may timeout
+  // BAD: No cleanup on client disconnect
+});",error,https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events
+13,SSE with Express,Set up SSE endpoints in Express applications,"Configure Express routes for SSE with proper middleware handling. Ensure compression middleware doesn't buffer SSE responses and handle CORS correctly.",Disable compression for SSE routes and configure proper CORS headers,Let compression middleware buffer SSE events or forget to flush responses,"import express from 'express';
+import compression from 'compression';
+
+const app = express();
+
+// Disable compression for SSE routes
+app.use(
+  compression({
+    filter: (req, res) => {
+      if (req.headers.accept === 'text/event-stream') {
+        return false; // Don't compress SSE
+      }
+      return compression.filter(req, res);
+    },
+  })
+);
+
+// SSE middleware
+function sseMiddleware(req: express.Request, res: express.Response, next: express.NextFunction) {
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache, no-transform',
+    Connection: 'keep-alive',
+    'Access-Control-Allow-Origin': process.env.CLIENT_URL || '*',
+    'Access-Control-Allow-Credentials': 'true',
+    'X-Accel-Buffering': 'no',
+  });
+
+  res.flushHeaders();
+
+  // Attach helper to response
+  (res as any).sendEvent = (event: string, data: unknown, id?: string) => {
+    if (id) res.write(`id: ${id}\n`);
+    res.write(`event: ${event}\n`);
+    res.write(`data: ${JSON.stringify(data)}\n\n`);
+  };
+
+  next();
+}
+
+app.get('/api/notifications/stream', authenticateToken, sseMiddleware, (req: any, res: any) => {
+  res.sendEvent('connected', { message: 'Listening for notifications' });
+
+  const userId = req.user.sub;
+  const handler = (notification: any) => {
+    res.sendEvent('notification', notification, notification.id);
+  };
+
+  eventEmitter.on(`notify:${userId}`, handler);
+
+  req.on('close', () => {
+    eventEmitter.off(`notify:${userId}`, handler);
+  });
+});","import express from 'express';
+import compression from 'compression';
+
+const app = express();
+app.use(compression()); // BAD: compresses SSE responses, causing buffering
+
+app.get('/events', (req, res) => {
+  // BAD: Not setting headers properly
+  res.setHeader('Content-Type', 'text/event-stream');
+  // BAD: Missing flushHeaders() - response may buffer
+  // BAD: Missing Cache-Control, Connection headers
+  // BAD: Missing X-Accel-Buffering for nginx
+
+  res.write('data: hello\n\n');
+  // BAD: Events may be buffered by compression middleware
+  // BAD: No cleanup, no keepalive
+});",warning,https://expressjs.com/en/api.html
+14,SSE with Fetch API,Connect to SSE with EventSource on the client,"Use the EventSource API or fetch with ReadableStream to connect to SSE endpoints. Handle reconnection and parse events properly.",Use EventSource for simple SSE or fetch with ReadableStream for custom headers,Use WebSocket when SSE is sufficient or implement manual polling,"// Option 1: EventSource (simple, built-in reconnection)
+const eventSource = new EventSource('/api/events', {
+  withCredentials: true, // Send cookies
+});
+
+eventSource.addEventListener('connected', (event: MessageEvent) => {
+  const data = JSON.parse(event.data);
+  console.log('Connected:', data.clientId);
+});
+
+eventSource.addEventListener('notification', (event: MessageEvent) => {
+  const notification = JSON.parse(event.data);
+  showNotification(notification);
+});
+
+eventSource.addEventListener('error', (event: Event) => {
+  if (eventSource.readyState === EventSource.CLOSED) {
+    console.log('SSE connection closed');
+  } else {
+    console.log('SSE reconnecting...');
+  }
+});
+
+// Option 2: Fetch API (supports custom headers)
+async function connectSSE(token: string): Promise<void> {
+  const response = await fetch('/api/events', {
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: 'text/event-stream',
+    },
+  });
+
+  const reader = response.body!.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split('\n\n');
+    buffer = lines.pop() || '';
+
+    for (const block of lines) {
+      const event = parseSSEBlock(block);
+      if (event) handleEvent(event);
+    }
+  }
+}
+
+function parseSSEBlock(block: string): { event: string; data: string; id?: string } | null {
+  const lines = block.split('\n');
+  const result: any = {};
+  for (const line of lines) {
+    if (line.startsWith('event: ')) result.event = line.slice(7);
+    else if (line.startsWith('data: ')) result.data = line.slice(6);
+    else if (line.startsWith('id: ')) result.id = line.slice(4);
+  }
+  return result.data ? result : null;
+}","// BAD: Polling instead of SSE
+setInterval(async () => {
+  // BAD: Polling every second wastes bandwidth and server resources
+  const response = await fetch('/api/notifications');
+  const data = await response.json();
+  updateUI(data);
+}, 1000);
+
+// BAD: No error handling with EventSource
+const es = new EventSource('/events');
+es.onmessage = (e) => {
+  console.log(e.data); // BAD: no event type handling, no parsing
+  // BAD: no error handler - silent failures
+  // BAD: no reconnection handling
+};",info,https://developer.mozilla.org/en-US/docs/Web/API/EventSource
+15,SSE Reconnection,Handle SSE reconnection with Last-Event-ID,"Implement automatic reconnection with event ID tracking so clients can resume from where they left off. Use the retry field to control reconnection timing.",Send event IDs with each message and handle the Last-Event-ID header on reconnection,Ignore reconnection or resend all events from the beginning on reconnect,"import express from 'express';
+
+interface StoredEvent {
+  id: string;
+  event: string;
+  data: unknown;
+  timestamp: number;
+}
+
+// In-memory event buffer (use Redis in production)
+const eventBuffer: StoredEvent[] = [];
+const MAX_BUFFER_SIZE = 1000;
+
+function storeEvent(event: StoredEvent): void {
+  eventBuffer.push(event);
+  if (eventBuffer.length > MAX_BUFFER_SIZE) {
+    eventBuffer.shift();
+  }
+}
+
+app.get('/api/events', authenticateToken, (req: any, res) => {
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache',
+    Connection: 'keep-alive',
+  });
+
+  // Set reconnection interval (5 seconds)
+  res.write('retry: 5000\n\n');
+
+  // Replay missed events if client reconnects
+  const lastEventId = req.headers['last-event-id'];
+  if (lastEventId) {
+    const missedIndex = eventBuffer.findIndex((e) => e.id === lastEventId);
+    if (missedIndex !== -1) {
+      const missedEvents = eventBuffer.slice(missedIndex + 1);
+      for (const event of missedEvents) {
+        res.write(`id: ${event.id}\n`);
+        res.write(`event: ${event.event}\n`);
+        res.write(`data: ${JSON.stringify(event.data)}\n\n`);
+      }
+    }
+  }
+
+  // Register for new events
+  const handler = (event: StoredEvent) => {
+    res.write(`id: ${event.id}\n`);
+    res.write(`event: ${event.event}\n`);
+    res.write(`data: ${JSON.stringify(event.data)}\n\n`);
+  };
+
+  eventEmitter.on('newEvent', handler);
+
+  req.on('close', () => {
+    eventEmitter.off('newEvent', handler);
+  });
+});
+
+// Publishing events
+function publishEvent(event: string, data: unknown): void {
+  const stored: StoredEvent = {
+    id: crypto.randomUUID(),
+    event,
+    data,
+    timestamp: Date.now(),
+  };
+  storeEvent(stored);
+  eventEmitter.emit('newEvent', stored);
+}","// BAD: No event IDs, no replay on reconnect
+app.get('/events', (req, res) => {
+  res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+
+  // BAD: No retry field - uses browser default (usually 3s)
+  // BAD: No Last-Event-ID check - missed events are lost
+
+  const handler = (data: any) => {
+    // BAD: No event ID - client can't track position
+    res.write(`data: ${JSON.stringify(data)}\n\n`);
+  };
+
+  eventEmitter.on('event', handler);
+  // BAD: On reconnect, client has no way to get missed events
+});",warning,https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events/Using_server-sent_events
+16,Broadcast Pattern,Send messages to all connected clients efficiently,"Implement a broadcast pattern that sends messages to all connected clients or a filtered subset. Handle disconnected clients gracefully.",Iterate over connected clients with readyState checks and handle errors per client,Broadcast without checking connection state or use a try/catch around the entire loop,"import { WebSocketServer, WebSocket } from 'ws';
+
+interface ConnectedClient {
+  ws: WebSocket;
+  userId: string;
+  subscriptions: Set<string>;
+}
+
+const clients = new Map<string, ConnectedClient>();
+
+function broadcast(event: string, data: unknown, filter?: (client: ConnectedClient) => boolean): void {
+  const message = JSON.stringify({ type: event, payload: data, timestamp: Date.now() });
+
+  for (const [clientId, client] of clients) {
+    if (client.ws.readyState !== WebSocket.OPEN) {
+      clients.delete(clientId);
+      continue;
+    }
+
+    if (filter && !filter(client)) {
+      continue;
+    }
+
+    try {
+      client.ws.send(message);
+    } catch (err) {
+      console.error(`Failed to send to ${clientId}:`, err);
+      clients.delete(clientId);
+    }
+  }
+}
+
+// Broadcast to all clients
+function broadcastAll(event: string, data: unknown): void {
+  broadcast(event, data);
+}
+
+// Broadcast to clients subscribed to a topic
+function broadcastToTopic(topic: string, event: string, data: unknown): void {
+  broadcast(event, data, (client) => client.subscriptions.has(topic));
+}
+
+// Broadcast to a specific user (across multiple devices)
+function broadcastToUser(userId: string, event: string, data: unknown): void {
+  broadcast(event, data, (client) => client.userId === userId);
+}
+
+// Usage
+broadcastAll('system:announcement', { message: 'Server maintenance in 10 minutes' });
+broadcastToTopic('stocks:AAPL', 'price:update', { symbol: 'AAPL', price: 150.25 });
+broadcastToUser('user-123', 'notification', { text: 'New message received' });","import { WebSocketServer, WebSocket } from 'ws';
+
+// BAD: No connection state check, no error handling
+function broadcast(wss: WebSocketServer, data: any) {
+  // BAD: Wrapping entire loop in try/catch - one failure stops all broadcasts
+  try {
+    wss.clients.forEach((client) => {
+      // BAD: No readyState check - sending to closed connections
+      client.send(JSON.stringify(data));
+    });
+  } catch (err) {
+    console.error(err); // BAD: One error stops remaining broadcasts
+  }
+}
+
+// BAD: No filtering capability, no cleanup of dead connections",warning,https://www.npmjs.com/package/ws
+17,Room-based Messaging,Implement room management for group communication,"Create a room system for grouping WebSocket clients into channels. Support join, leave, and broadcast-to-room operations with proper cleanup.",Maintain room membership maps and clean up when clients disconnect,Store room memberships only on the client side or skip cleanup,"import { WebSocket } from 'ws';
+
+interface RoomClient {
+  ws: WebSocket;
+  userId: string;
+  username: string;
+}
+
+class RoomManager {
+  private rooms = new Map<string, Map<string, RoomClient>>();
+
+  join(roomId: string, clientId: string, client: RoomClient): void {
+    if (!this.rooms.has(roomId)) {
+      this.rooms.set(roomId, new Map());
+    }
+    this.rooms.get(roomId)!.set(clientId, client);
+
+    this.broadcastToRoom(roomId, 'room:userJoined', {
+      userId: client.userId,
+      username: client.username,
+      memberCount: this.rooms.get(roomId)!.size,
+    }, clientId);
+  }
+
+  leave(roomId: string, clientId: string): void {
+    const room = this.rooms.get(roomId);
+    if (!room) return;
+
+    const client = room.get(clientId);
+    room.delete(clientId);
+
+    if (room.size === 0) {
+      this.rooms.delete(roomId);
+    } else if (client) {
+      this.broadcastToRoom(roomId, 'room:userLeft', {
+        userId: client.userId,
+        memberCount: room.size,
+      });
+    }
+  }
+
+  leaveAll(clientId: string): void {
+    for (const [roomId] of this.rooms) {
+      this.leave(roomId, clientId);
+    }
+  }
+
+  broadcastToRoom(roomId: string, event: string, data: unknown, excludeClientId?: string): void {
+    const room = this.rooms.get(roomId);
+    if (!room) return;
+
+    const message = JSON.stringify({ type: event, payload: data, timestamp: Date.now() });
+
+    for (const [clientId, client] of room) {
+      if (clientId === excludeClientId) continue;
+      if (client.ws.readyState === WebSocket.OPEN) {
+        client.ws.send(message);
+      }
+    }
+  }
+
+  getMembers(roomId: string): string[] {
+    const room = this.rooms.get(roomId);
+    return room ? Array.from(room.values()).map((c) => c.userId) : [];
+  }
+}
+
+const roomManager = new RoomManager();","// BAD: No room management abstraction, no cleanup
+const rooms: Record<string, WebSocket[]> = {};
+
+function joinRoom(ws: WebSocket, room: string) {
+  if (!rooms[room]) rooms[room] = [];
+  rooms[room].push(ws); // BAD: no deduplication
+}
+
+function sendToRoom(room: string, data: any) {
+  rooms[room]?.forEach((ws) => {
+    ws.send(JSON.stringify(data)); // BAD: no readyState check
+  });
+  // BAD: dead connections accumulate in room arrays
+  // BAD: no leave/cleanup when clients disconnect
+}",warning,https://socket.io/docs/v4/rooms/
+18,Presence Tracking,Track online/offline status of connected users,"Implement a presence system that tracks which users are currently online. Broadcast presence changes and handle multi-device scenarios.",Track presence per user across multiple connections and broadcast changes,Track presence per socket connection without accounting for multiple devices,"import { WebSocket } from 'ws';
+
+interface UserPresence {
+  userId: string;
+  username: string;
+  status: 'online' | 'away' | 'offline';
+  lastSeen: number;
+  connections: Set<string>; // Multiple device support
+}
+
+class PresenceManager {
+  private presenceMap = new Map<string, UserPresence>();
+  private onChangeCallbacks: Array<(userId: string, presence: UserPresence) => void> = [];
+
+  onChange(callback: (userId: string, presence: UserPresence) => void): void {
+    this.onChangeCallbacks.push(callback);
+  }
+
+  private notifyChange(userId: string): void {
+    const presence = this.presenceMap.get(userId);
+    if (presence) {
+      this.onChangeCallbacks.forEach((cb) => cb(userId, presence));
+    }
+  }
+
+  connect(userId: string, username: string, connectionId: string): void {
+    const existing = this.presenceMap.get(userId);
+
+    if (existing) {
+      existing.connections.add(connectionId);
+      if (existing.status === 'offline') {
+        existing.status = 'online';
+        existing.lastSeen = Date.now();
+        this.notifyChange(userId);
+      }
+    } else {
+      this.presenceMap.set(userId, {
+        userId,
+        username,
+        status: 'online',
+        lastSeen: Date.now(),
+        connections: new Set([connectionId]),
+      });
+      this.notifyChange(userId);
+    }
+  }
+
+  disconnect(userId: string, connectionId: string): void {
+    const presence = this.presenceMap.get(userId);
+    if (!presence) return;
+
+    presence.connections.delete(connectionId);
+
+    if (presence.connections.size === 0) {
+      presence.status = 'offline';
+      presence.lastSeen = Date.now();
+      this.notifyChange(userId);
+    }
+  }
+
+  setStatus(userId: string, status: 'online' | 'away'): void {
+    const presence = this.presenceMap.get(userId);
+    if (presence && presence.connections.size > 0) {
+      presence.status = status;
+      this.notifyChange(userId);
+    }
+  }
+
+  getOnlineUsers(): UserPresence[] {
+    return Array.from(this.presenceMap.values()).filter((p) => p.status !== 'offline');
+  }
+}
+
+const presence = new PresenceManager();","// BAD: Simple set-based tracking, no multi-device support
+const onlineUsers = new Set<string>();
+
+wss.on('connection', (ws: any) => {
+  onlineUsers.add(ws.userId); // BAD: no multi-device handling
+
+  ws.on('close', () => {
+    onlineUsers.delete(ws.userId); // BAD: removes user even if they have other connections
+    // BAD: no broadcast of presence change
+    // BAD: no lastSeen tracking
+  });
+});",warning,https://socket.io/docs/v4/rooms/
+19,Message Ordering,Ensure message ordering with sequence numbers,"Assign monotonically increasing sequence numbers to messages to detect out-of-order delivery and gaps. Clients can request missed messages.",Include sequence numbers in all messages and implement gap detection on the client,Assume messages always arrive in order or ignore ordering entirely,"interface OrderedMessage {
+  seq: number;
+  type: string;
+  payload: unknown;
+  timestamp: number;
+}
+
+class OrderedMessageSender {
+  private sequenceCounters = new Map<string, number>();
+
+  getNextSeq(channelId: string): number {
+    const current = this.sequenceCounters.get(channelId) || 0;
+    const next = current + 1;
+    this.sequenceCounters.set(channelId, next);
+    return next;
+  }
+
+  createMessage(channelId: string, type: string, payload: unknown): OrderedMessage {
+    return {
+      seq: this.getNextSeq(channelId),
+      type,
+      payload,
+      timestamp: Date.now(),
+    };
+  }
+}
+
+// Client-side message ordering
+class OrderedMessageReceiver {
+  private expectedSeq = new Map<string, number>();
+  private buffer = new Map<string, Map<number, OrderedMessage>>();
+  private onMessage: (channelId: string, message: OrderedMessage) => void;
+  private onGap: (channelId: string, from: number, to: number) => void;
+
+  constructor(
+    onMessage: (channelId: string, message: OrderedMessage) => void,
+    onGap: (channelId: string, from: number, to: number) => void
+  ) {
+    this.onMessage = onMessage;
+    this.onGap = onGap;
+  }
+
+  receive(channelId: string, message: OrderedMessage): void {
+    const expected = this.expectedSeq.get(channelId) || 1;
+
+    if (message.seq === expected) {
+      this.deliver(channelId, message);
+      this.flushBuffer(channelId);
+    } else if (message.seq > expected) {
+      // Buffer out-of-order message
+      if (!this.buffer.has(channelId)) this.buffer.set(channelId, new Map());
+      this.buffer.get(channelId)!.set(message.seq, message);
+      this.onGap(channelId, expected, message.seq);
+    }
+    // Ignore duplicates (seq < expected)
+  }
+
+  private deliver(channelId: string, message: OrderedMessage): void {
+    this.expectedSeq.set(channelId, message.seq + 1);
+    this.onMessage(channelId, message);
+  }
+
+  private flushBuffer(channelId: string): void {
+    const buf = this.buffer.get(channelId);
+    if (!buf) return;
+    let expected = this.expectedSeq.get(channelId)!;
+    while (buf.has(expected)) {
+      this.deliver(channelId, buf.get(expected)!);
+      buf.delete(expected);
+      expected++;
+    }
+  }
+}","// BAD: No ordering, no gap detection
+wss.on('connection', (ws) => {
+  ws.on('message', (data) => {
+    const msg = JSON.parse(data.toString());
+    // BAD: No sequence number, no ordering guarantee
+    broadcastToRoom(msg.room, msg);
+    // Messages may arrive out of order, especially under load
+    // No way for clients to detect missing messages
+  });
+});",info,https://en.wikipedia.org/wiki/Sequence_number
+20,Binary Data,Handle binary data transfer over WebSockets,"Support ArrayBuffer and Blob data transfer for efficient binary communication. Implement a message framing protocol that supports both text and binary messages.",Use a type prefix byte to distinguish message types and transfer binary data efficiently,Convert all binary data to base64 strings for transmission,"import { WebSocket, RawData } from 'ws';
+
+// Message type byte prefixes
+const MSG_TYPE = {
+  TEXT: 0x01,
+  BINARY: 0x02,
+  FILE_CHUNK: 0x03,
+  FILE_META: 0x04,
+} as const;
+
+function sendTextMessage(ws: WebSocket, payload: unknown): void {
+  const json = JSON.stringify(payload);
+  const data = Buffer.alloc(1 + Buffer.byteLength(json));
+  data.writeUInt8(MSG_TYPE.TEXT, 0);
+  data.write(json, 1);
+  ws.send(data);
+}
+
+function sendBinaryMessage(ws: WebSocket, type: number, binary: Buffer): void {
+  const data = Buffer.alloc(1 + binary.length);
+  data.writeUInt8(type, 0);
+  binary.copy(data, 1);
+  ws.send(data);
+}
+
+// File upload via WebSocket chunks
+interface FileUpload {
+  fileName: string;
+  fileSize: number;
+  mimeType: string;
+  chunks: Buffer[];
+  received: number;
+}
+
+const uploads = new Map<string, FileUpload>();
+
+function handleMessage(ws: WebSocket, raw: RawData): void {
+  const data = Buffer.from(raw as ArrayBuffer);
+  const type = data.readUInt8(0);
+  const payload = data.subarray(1);
+
+  switch (type) {
+    case MSG_TYPE.TEXT: {
+      const json = JSON.parse(payload.toString());
+      handleTextMessage(ws, json);
+      break;
+    }
+    case MSG_TYPE.FILE_META: {
+      const meta = JSON.parse(payload.toString());
+      uploads.set(meta.uploadId, { ...meta, chunks: [], received: 0 });
+      sendTextMessage(ws, { type: 'upload:ready', uploadId: meta.uploadId });
+      break;
+    }
+    case MSG_TYPE.FILE_CHUNK: {
+      const uploadId = payload.subarray(0, 36).toString(); // UUID
+      const chunk = payload.subarray(36);
+      const upload = uploads.get(uploadId);
+      if (upload) {
+        upload.chunks.push(chunk);
+        upload.received += chunk.length;
+        const progress = Math.round((upload.received / upload.fileSize) * 100);
+        sendTextMessage(ws, { type: 'upload:progress', uploadId, progress });
+      }
+      break;
+    }
+  }
+}
+
+wss.on('connection', (ws) => {
+  ws.binaryType = 'arraybuffer';
+  ws.on('message', (data) => handleMessage(ws, data));
+});","// BAD: Converting binary to base64 strings
+wss.on('connection', (ws) => {
+  ws.on('message', (data) => {
+    const msg = JSON.parse(data.toString());
+
+    if (msg.type === 'file') {
+      // BAD: base64 encoding increases size by ~33%
+      const fileData = msg.data; // base64 string
+      const buffer = Buffer.from(fileData, 'base64');
+      // BAD: Entire file in one message - no chunking, no progress
+      // BAD: No file size limit validation
+      fs.writeFileSync(msg.fileName, buffer); // BAD: blocking, no path sanitization
+    }
+  });
+});",info,https://developer.mozilla.org/en-US/docs/Web/API/WebSocket/binaryType
+21,Error Handling,Implement connection error recovery for real-time clients,"Handle WebSocket errors gracefully with automatic reconnection using exponential backoff. Provide meaningful error messages and queue messages during disconnection.",Implement exponential backoff reconnection and queue messages while disconnected,Ignore errors or reconnect immediately in a tight loop,"import { WebSocket } from 'ws';
+
+interface ReconnectConfig {
+  maxAttempts: number;
+  baseDelay: number;
+  maxDelay: number;
+  jitter: boolean;
+}
+
+class ResilientWebSocket {
+  private ws: WebSocket | null = null;
+  private url: string;
+  private config: ReconnectConfig;
+  private attempts = 0;
+  private messageQueue: string[] = [];
+  private isClosedManually = false;
+  private handlers = new Map<string, Function[]>();
+
+  constructor(url: string, config?: Partial<ReconnectConfig>) {
+    this.url = url;
+    this.config = {
+      maxAttempts: 10,
+      baseDelay: 1000,
+      maxDelay: 30000,
+      jitter: true,
+      ...config,
+    };
+    this.connect();
+  }
+
+  private connect(): void {
+    this.ws = new WebSocket(this.url);
+
+    this.ws.on('open', () => {
+      console.log('WebSocket connected');
+      this.attempts = 0;
+      this.flushQueue();
+    });
+
+    this.ws.on('message', (data) => {
+      const message = JSON.parse(data.toString());
+      const handlers = this.handlers.get(message.type) || [];
+      handlers.forEach((h) => h(message.payload));
+    });
+
+    this.ws.on('close', (code) => {
+      if (!this.isClosedManually && code !== 1000) {
+        this.reconnect();
+      }
+    });
+
+    this.ws.on('error', (err) => {
+      console.error('WebSocket error:', err.message);
+    });
+  }
+
+  private reconnect(): void {
+    if (this.attempts >= this.config.maxAttempts) {
+      console.error('Max reconnection attempts reached');
+      return;
+    }
+
+    const delay = Math.min(
+      this.config.baseDelay * Math.pow(2, this.attempts),
+      this.config.maxDelay
+    );
+    const jitter = this.config.jitter ? Math.random() * delay * 0.1 : 0;
+
+    this.attempts++;
+    console.log(`Reconnecting in ${delay + jitter}ms (attempt ${this.attempts})`);
+    setTimeout(() => this.connect(), delay + jitter);
+  }
+
+  send(type: string, payload: unknown): void {
+    const message = JSON.stringify({ type, payload });
+    if (this.ws?.readyState === WebSocket.OPEN) {
+      this.ws.send(message);
+    } else {
+      this.messageQueue.push(message);
+    }
+  }
+
+  private flushQueue(): void {
+    while (this.messageQueue.length > 0 && this.ws?.readyState === WebSocket.OPEN) {
+      this.ws.send(this.messageQueue.shift()!);
+    }
+  }
+
+  close(): void {
+    this.isClosedManually = true;
+    this.ws?.close(1000, 'Client closing');
+  }
+}","// BAD: No reconnection, no error handling, no message queueing
+const ws = new WebSocket('ws://localhost:3000');
+
+ws.onopen = () => console.log('connected');
+ws.onmessage = (e) => console.log(e.data);
+
+// BAD: No error handler
+// BAD: No close handler with reconnection
+// BAD: No message queue for offline periods
+
+ws.onerror = (e) => {
+  console.log('error'); // BAD: no reconnection attempt
+};
+
+ws.onclose = () => {
+  console.log('closed'); // BAD: no automatic reconnection
+  // BAD: Messages sent while disconnected are lost
+};",error,https://developer.mozilla.org/en-US/docs/Web/API/WebSocket
+22,Scaling,Scale real-time services horizontally with Redis pub/sub,"Use Redis pub/sub to coordinate messages across multiple server instances behind a load balancer. Each instance subscribes to channels and forwards to local clients.",Use Redis pub/sub for cross-instance communication and sticky sessions for WebSocket,Broadcast only to local clients or use shared state without pub/sub,"import { WebSocketServer, WebSocket } from 'ws';
+import { createClient } from 'redis';
+
+const pub = createClient({ url: process.env.REDIS_URL });
+const sub = createClient({ url: process.env.REDIS_URL });
+await Promise.all([pub.connect(), sub.connect()]);
+
+const wss = new WebSocketServer({ server });
+const localClients = new Map<string, { ws: WebSocket; userId: string; rooms: Set<string> }>();
+
+// Subscribe to Redis channels for cross-instance messaging
+await sub.subscribe('broadcast', (message) => {
+  const parsed = JSON.parse(message);
+  for (const [, client] of localClients) {
+    if (client.ws.readyState === WebSocket.OPEN) {
+      client.ws.send(message);
+    }
+  }
+});
+
+await sub.pSubscribe('room:*', (message, channel) => {
+  const roomId = channel.replace('room:', '');
+  for (const [, client] of localClients) {
+    if (client.rooms.has(roomId) && client.ws.readyState === WebSocket.OPEN) {
+      client.ws.send(message);
+    }
+  }
+});
+
+// Publish messages via Redis (reaches all instances)
+async function publishToRoom(roomId: string, event: string, data: unknown): Promise<void> {
+  const message = JSON.stringify({ type: event, payload: data, timestamp: Date.now() });
+  await pub.publish(`room:${roomId}`, message);
+}
+
+async function publishBroadcast(event: string, data: unknown): Promise<void> {
+  const message = JSON.stringify({ type: event, payload: data, timestamp: Date.now() });
+  await pub.publish('broadcast', message);
+}
+
+wss.on('connection', (ws) => {
+  const clientId = crypto.randomUUID();
+  localClients.set(clientId, { ws, userId: '', rooms: new Set() });
+
+  ws.on('message', async (raw) => {
+    const msg = JSON.parse(raw.toString());
+    if (msg.type === 'chat:send') {
+      await publishToRoom(msg.payload.roomId, 'chat:message', msg.payload);
+    }
+  });
+
+  ws.on('close', () => localClients.delete(clientId));
+});","import { WebSocketServer } from 'ws';
+
+// BAD: Only broadcasts to local instance
+const wss = new WebSocketServer({ port: 8080 });
+
+wss.on('connection', (ws) => {
+  ws.on('message', (data) => {
+    // BAD: Only sends to clients connected to THIS server instance
+    wss.clients.forEach((client) => {
+      client.send(data); // Other instances don't receive this
+    });
+  });
+});
+
+// BAD: With a load balancer, clients on different instances can't communicate
+// BAD: No Redis or message broker for cross-instance messaging",error,https://redis.io/docs/latest/develop/interact/pubsub/
+23,Testing,Test WebSocket connections with mock clients,"Write tests for WebSocket servers using mock clients. Test connection lifecycle, message handling, and error scenarios.",Create test helpers that connect real WebSocket clients to the test server and await events,Skip WebSocket tests or test only HTTP endpoints,"import { WebSocketServer, WebSocket } from 'ws';
+import { createServer, Server as HttpServer } from 'http';
+import { AddressInfo } from 'net';
+
+// Test helper: create a test server and client
+async function createTestServer(setupFn: (wss: WebSocketServer) => void): Promise<{
+  server: HttpServer;
+  wss: WebSocketServer;
+  url: string;
+  close: () => Promise<void>;
+}> {
+  const server = createServer();
+  const wss = new WebSocketServer({ server });
+  setupFn(wss);
+
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+  const url = `ws://localhost:${port}`;
+
+  return {
+    server,
+    wss,
+    url,
+    close: () => new Promise((resolve) => {
+      wss.close(() => server.close(() => resolve()));
+    }),
+  };
+}
+
+function createTestClient(url: string): Promise<WebSocket> {
+  return new Promise((resolve, reject) => {
+    const ws = new WebSocket(url);
+    ws.on('open', () => resolve(ws));
+    ws.on('error', reject);
+  });
+}
+
+function waitForMessage(ws: WebSocket): Promise<any> {
+  return new Promise((resolve) => {
+    ws.once('message', (data) => {
+      resolve(JSON.parse(data.toString()));
+    });
+  });
+}
+
+// Tests
+describe('WebSocket Server', () => {
+  let testEnv: Awaited<ReturnType<typeof createTestServer>>;
+
+  beforeEach(async () => {
+    testEnv = await createTestServer((wss) => {
+      wss.on('connection', (ws) => {
+        ws.on('message', (data) => {
+          const msg = JSON.parse(data.toString());
+          if (msg.type === 'echo') {
+            ws.send(JSON.stringify({ type: 'echo', payload: msg.payload }));
+          }
+        });
+      });
+    });
+  });
+
+  afterEach(async () => {
+    await testEnv.close();
+  });
+
+  it('should accept connections', async () => {
+    const client = await createTestClient(testEnv.url);
+    expect(client.readyState).toBe(WebSocket.OPEN);
+    client.close();
+  });
+
+  it('should echo messages', async () => {
+    const client = await createTestClient(testEnv.url);
+    const messagePromise = waitForMessage(client);
+    client.send(JSON.stringify({ type: 'echo', payload: 'hello' }));
+    const response = await messagePromise;
+    expect(response).toEqual({ type: 'echo', payload: 'hello' });
+    client.close();
+  });
+
+  it('should handle disconnection', async () => {
+    const client = await createTestClient(testEnv.url);
+    expect(testEnv.wss.clients.size).toBe(1);
+    client.close();
+    await new Promise((r) => setTimeout(r, 100));
+    expect(testEnv.wss.clients.size).toBe(0);
+  });
+});","// BAD: No WebSocket tests, or mocking everything
+describe('WebSocket Server', () => {
+  it('should work', () => {
+    // BAD: Just testing the handler function in isolation
+    const mockWs = { send: jest.fn(), on: jest.fn() };
+    handleConnection(mockWs as any);
+    // BAD: Not testing actual WebSocket communication
+    // BAD: Not testing connection lifecycle
+    // BAD: Not testing error scenarios
+    expect(mockWs.on).toHaveBeenCalled(); // Meaningless assertion
+  });
+});",warning,https://jestjs.io/docs/getting-started
+24,Rate Limiting,Limit message rate per client connection,"Implement rate limiting for WebSocket messages to prevent abuse and DoS attacks. Track message counts per connection with sliding windows.",Track messages per connection with a sliding window and disconnect abusive clients,Allow unlimited messages or only rate limit at the HTTP level,"import { WebSocket } from 'ws';
+
+interface RateLimitConfig {
+  maxMessages: number;
+  windowMs: number;
+  maxWarnings: number;
+}
+
+class MessageRateLimiter {
+  private windows = new Map<string, { timestamps: number[]; warnings: number }>();
+  private config: RateLimitConfig;
+
+  constructor(config: RateLimitConfig) {
+    this.config = config;
+  }
+
+  isAllowed(clientId: string): { allowed: boolean; remaining: number; retryAfter?: number } {
+    const now = Date.now();
+    const windowStart = now - this.config.windowMs;
+
+    if (!this.windows.has(clientId)) {
+      this.windows.set(clientId, { timestamps: [], warnings: 0 });
+    }
+
+    const record = this.windows.get(clientId)!;
+
+    // Remove timestamps outside the window
+    record.timestamps = record.timestamps.filter((t) => t > windowStart);
+
+    if (record.timestamps.length >= this.config.maxMessages) {
+      record.warnings++;
+      const oldestInWindow = record.timestamps[0];
+      const retryAfter = oldestInWindow + this.config.windowMs - now;
+
+      return {
+        allowed: false,
+        remaining: 0,
+        retryAfter,
+      };
+    }
+
+    record.timestamps.push(now);
+    return {
+      allowed: true,
+      remaining: this.config.maxMessages - record.timestamps.length,
+    };
+  }
+
+  shouldDisconnect(clientId: string): boolean {
+    const record = this.windows.get(clientId);
+    return (record?.warnings ?? 0) >= this.config.maxWarnings;
+  }
+
+  cleanup(clientId: string): void {
+    this.windows.delete(clientId);
+  }
+}
+
+const rateLimiter = new MessageRateLimiter({
+  maxMessages: 30,   // 30 messages
+  windowMs: 10000,   // per 10 seconds
+  maxWarnings: 3,    // 3 warnings before disconnect
+});
+
+wss.on('connection', (ws, req) => {
+  const clientId = req.headers['x-forwarded-for'] as string || req.socket.remoteAddress || '';
+
+  ws.on('message', (data) => {
+    const result = rateLimiter.isAllowed(clientId);
+
+    if (!result.allowed) {
+      ws.send(JSON.stringify({
+        type: 'error',
+        payload: { code: 'RATE_LIMITED', retryAfter: result.retryAfter },
+      }));
+
+      if (rateLimiter.shouldDisconnect(clientId)) {
+        ws.close(1008, 'Rate limit exceeded');
+      }
+      return;
+    }
+
+    handleMessage(ws, data);
+  });
+
+  ws.on('close', () => rateLimiter.cleanup(clientId));
+});","// BAD: No rate limiting on WebSocket messages
+wss.on('connection', (ws) => {
+  ws.on('message', (data) => {
+    // BAD: No rate limiting - client can flood the server
+    const msg = JSON.parse(data.toString());
+    broadcastToAll(msg);
+    // A single malicious client can send thousands of messages per second
+    // causing server overload and affecting all other clients
+  });
+});",error,https://www.npmjs.com/package/ws
+25,Graceful Disconnect,Clean up resources on WebSocket disconnection,"Handle client disconnections gracefully by cleaning up all associated resources including rooms, presence, subscriptions, and pending operations.",Listen for both close and disconnecting events and clean up all resources,Ignore disconnect events or leave stale resources behind,"import { WebSocket } from 'ws';
+
+interface ClientState {
+  ws: WebSocket;
+  userId: string;
+  connectionId: string;
+  rooms: Set<string>;
+  subscriptions: Set<string>;
+  pendingAcks: Map<string, NodeJS.Timeout>;
+  heartbeatTimer?: NodeJS.Timeout;
+}
+
+const clients = new Map<string, ClientState>();
+
+function setupDisconnectHandler(state: ClientState): void {
+  const { ws, userId, connectionId } = state;
+
+  // Handle graceful close
+  ws.on('close', async (code, reason) => {
+    console.log(`Client ${connectionId} disconnected: ${code} ${reason.toString()}`);
+    await cleanupClient(state);
+  });
+
+  // Handle errors that lead to disconnection
+  ws.on('error', async (err) => {
+    console.error(`Client ${connectionId} error:`, err.message);
+    // Close event will fire after error, triggering cleanup
+  });
+}
+
+async function cleanupClient(state: ClientState): Promise<void> {
+  const { userId, connectionId, rooms, subscriptions, pendingAcks, heartbeatTimer } = state;
+
+  // 1. Clear heartbeat timer
+  if (heartbeatTimer) {
+    clearInterval(heartbeatTimer);
+  }
+
+  // 2. Clear pending acknowledgment timeouts
+  for (const [, timer] of pendingAcks) {
+    clearTimeout(timer);
+  }
+  pendingAcks.clear();
+
+  // 3. Leave all rooms and notify members
+  for (const roomId of rooms) {
+    roomManager.leave(roomId, connectionId);
+    roomManager.broadcastToRoom(roomId, 'room:userLeft', { userId });
+  }
+
+  // 4. Update presence
+  presenceManager.disconnect(userId, connectionId);
+
+  // 5. Unsubscribe from all topics
+  for (const topic of subscriptions) {
+    await pubsub.unsubscribe(topic, connectionId);
+  }
+
+  // 6. Persist any unsaved state
+  await db.userSession.update({
+    where: { connectionId },
+    data: { disconnectedAt: new Date(), status: 'disconnected' },
+  });
+
+  // 7. Remove from clients map
+  clients.delete(connectionId);
+
+  console.log(`Cleanup complete for ${connectionId}. Active clients: ${clients.size}`);
+}
+
+// Graceful server shutdown
+async function gracefulShutdown(): Promise<void> {
+  console.log('Server shutting down gracefully...');
+
+  // Notify all clients
+  for (const [, state] of clients) {
+    if (state.ws.readyState === WebSocket.OPEN) {
+      state.ws.send(JSON.stringify({ type: 'server:shutdown', payload: { reason: 'Server restarting' } }));
+      state.ws.close(1001, 'Server shutting down');
+    }
+  }
+
+  // Wait for cleanup to complete
+  await new Promise((resolve) => setTimeout(resolve, 5000));
+  process.exit(0);
+}
+
+process.on('SIGTERM', gracefulShutdown);
+process.on('SIGINT', gracefulShutdown);","// BAD: No cleanup on disconnect
+wss.on('connection', (ws) => {
+  const userId = authenticate(ws);
+  onlineUsers.add(userId);
+  rooms['general'].push(ws);
+
+  ws.on('message', (data) => handleMessage(ws, data));
+
+  // BAD: No close handler!
+  // - User stays in onlineUsers forever
+  // - Dead ws reference stays in rooms array
+  // - No presence update sent to other users
+  // - Memory leak from accumulated dead connections
+  // BAD: No server shutdown handling
+});",error,https://www.npmjs.com/package/ws

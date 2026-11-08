@@ -1,0 +1,2155 @@
+No,Pattern Name,Category,Keywords,Description,When To Use,When Not To Use,Code Example,Anti-Pattern,Complexity,Performance Impact,Common Packages,Docs URL
+1,Factory Function,Creational,"factory, creation, validation, encapsulation","Creates objects through functions instead of direct construction, encapsulating validation and initialization logic.","When object creation involves validation; when you need to hide construction complexity; when you want to return different types based on input.","When objects are trivially simple with no validation; when a plain object literal suffices.","import { randomUUID } from 'crypto';
+
+interface User {
+  readonly id: string;
+  readonly email: string;
+  readonly name: string;
+  readonly createdAt: Date;
+}
+
+interface CreateUserInput {
+  email: string;
+  name: string;
+}
+
+class ValidationError extends Error {
+  constructor(public readonly field: string, message: string) {
+    super(message);
+    this.name = 'ValidationError';
+  }
+}
+
+function createUser(input: CreateUserInput): User {
+  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  if (!emailRegex.test(input.email)) {
+    throw new ValidationError('email', `Invalid email: ${input.email}`);
+  }
+  if (input.name.trim().length < 2) {
+    throw new ValidationError('name', 'Name must be at least 2 characters');
+  }
+  return Object.freeze({
+    id: randomUUID(),
+    email: input.email.toLowerCase().trim(),
+    name: input.name.trim(),
+    createdAt: new Date(),
+  });
+}
+
+// Usage
+const user = createUser({ email: 'alice@example.com', name: 'Alice' });
+console.log(user.id, user.email);","Directly constructing objects everywhere without validation, leading to inconsistent state and duplicated checks across the codebase.",Low,Negligible,"zod, joi, class-validator",https://refactoring.guru/design-patterns/factory-method
+2,Abstract Factory,Creational,"abstract factory, family, platform, theme","Provides an interface for creating families of related objects without specifying their concrete classes.","When you need to create families of related objects that must be used together; when supporting multiple platforms or themes.","When you only have one family of objects; when the families rarely change and the indirection adds unnecessary complexity.","interface Button {
+  render(): string;
+}
+
+interface TextInput {
+  render(): string;
+}
+
+interface UIFactory {
+  createButton(label: string): Button;
+  createTextInput(placeholder: string): TextInput;
+}
+
+class DarkButton implements Button {
+  constructor(private label: string) {}
+  render(): string {
+    return `<button class=""dark-btn"">${this.label}</button>`;
+  }
+}
+
+class DarkTextInput implements TextInput {
+  constructor(private placeholder: string) {}
+  render(): string {
+    return `<input class=""dark-input"" placeholder=""${this.placeholder}"" />`;
+  }
+}
+
+class LightButton implements Button {
+  constructor(private label: string) {}
+  render(): string {
+    return `<button class=""light-btn"">${this.label}</button>`;
+  }
+}
+
+class LightTextInput implements TextInput {
+  constructor(private placeholder: string) {}
+  render(): string {
+    return `<input class=""light-input"" placeholder=""${this.placeholder}"" />`;
+  }
+}
+
+class DarkThemeFactory implements UIFactory {
+  createButton(label: string): Button {
+    return new DarkButton(label);
+  }
+  createTextInput(placeholder: string): TextInput {
+    return new DarkTextInput(placeholder);
+  }
+}
+
+class LightThemeFactory implements UIFactory {
+  createButton(label: string): Button {
+    return new LightButton(label);
+  }
+  createTextInput(placeholder: string): TextInput {
+    return new LightTextInput(placeholder);
+  }
+}
+
+function buildUI(factory: UIFactory): string {
+  const btn = factory.createButton('Submit');
+  const input = factory.createTextInput('Enter name...');
+  return `${input.render()} ${btn.render()}`;
+}
+
+// Usage
+const theme = process.env.THEME === 'dark' ? new DarkThemeFactory() : new LightThemeFactory();
+console.log(buildUI(theme));","Mixing UI elements from different families with hardcoded conditionals scattered throughout the rendering code.",High,Negligible,"@mui/material, antd",https://refactoring.guru/design-patterns/abstract-factory
+3,Builder Pattern,Creational,"builder, chaining, fluent, construction","Constructs complex objects step by step using method chaining, separating construction from representation.","When creating objects with many optional parameters; when construction has multiple steps; when you want a fluent API.","When objects have few fields; when the builder adds complexity without benefit.","interface QueryResult {
+  readonly sql: string;
+  readonly params: unknown[];
+}
+
+class QueryBuilder {
+  private tableName = '';
+  private conditions: string[] = [];
+  private parameters: unknown[] = [];
+  private selectedFields: string[] = ['*'];
+  private ordering: string[] = [];
+  private limitCount?: number;
+  private offsetCount?: number;
+
+  from(table: string): this {
+    this.tableName = table;
+    return this;
+  }
+
+  select(...fields: string[]): this {
+    this.selectedFields = fields;
+    return this;
+  }
+
+  where(condition: string, ...params: unknown[]): this {
+    this.conditions.push(condition);
+    this.parameters.push(...params);
+    return this;
+  }
+
+  orderBy(field: string, direction: 'ASC' | 'DESC' = 'ASC'): this {
+    this.ordering.push(`${field} ${direction}`);
+    return this;
+  }
+
+  limit(count: number): this {
+    this.limitCount = count;
+    return this;
+  }
+
+  offset(count: number): this {
+    this.offsetCount = count;
+    return this;
+  }
+
+  build(): QueryResult {
+    if (!this.tableName) throw new Error('Table name is required');
+    const parts = [`SELECT ${this.selectedFields.join(', ')} FROM ${this.tableName}`];
+    if (this.conditions.length > 0) {
+      parts.push(`WHERE ${this.conditions.join(' AND ')}`);
+    }
+    if (this.ordering.length > 0) {
+      parts.push(`ORDER BY ${this.ordering.join(', ')}`);
+    }
+    if (this.limitCount !== undefined) {
+      parts.push(`LIMIT ${this.limitCount}`);
+    }
+    if (this.offsetCount !== undefined) {
+      parts.push(`OFFSET ${this.offsetCount}`);
+    }
+    return { sql: parts.join(' '), params: this.parameters };
+  }
+}
+
+// Usage
+const query = new QueryBuilder()
+  .from('users')
+  .select('id', 'email', 'name')
+  .where('status = $1', 'active')
+  .where('age > $2', 18)
+  .orderBy('name', 'ASC')
+  .limit(10)
+  .offset(20)
+  .build();
+
+console.log(query.sql);
+console.log(query.params);","Constructors with dozens of optional parameters (telescoping constructor), making call sites unreadable and error-prone.",Medium,Negligible,"knex, typeorm QueryBuilder, drizzle-orm",https://refactoring.guru/design-patterns/builder
+4,Singleton,Creational,"singleton, instance, module, global state","Ensures a class or module has only one instance and provides a global point of access. In Node.js, module caching naturally provides singleton behavior.","When exactly one instance is needed (database pool, configuration, logger); when shared state must be coordinated.","When singletons hide dependencies; when they make testing difficult; when multiple instances are actually needed (e.g., multi-tenant).","import { Pool, PoolConfig } from 'pg';
+
+class Database {
+  private static instance: Database | null = null;
+  private pool: Pool;
+
+  private constructor(config: PoolConfig) {
+    this.pool = new Pool(config);
+    this.pool.on('error', (err) => {
+      console.error('Unexpected pool error:', err);
+    });
+  }
+
+  static getInstance(config?: PoolConfig): Database {
+    if (!Database.instance) {
+      if (!config) {
+        throw new Error('Database config required for first initialization');
+      }
+      Database.instance = new Database(config);
+    }
+    return Database.instance;
+  }
+
+  async query<T extends Record<string, unknown>>(
+    text: string,
+    params?: unknown[]
+  ): Promise<T[]> {
+    const client = await this.pool.connect();
+    try {
+      const result = await client.query(text, params);
+      return result.rows as T[];
+    } finally {
+      client.release();
+    }
+  }
+
+  async healthCheck(): Promise<boolean> {
+    try {
+      await this.pool.query('SELECT 1');
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  async shutdown(): Promise<void> {
+    await this.pool.end();
+    Database.instance = null;
+  }
+
+  // For testing: reset the singleton
+  static resetForTesting(): void {
+    Database.instance = null;
+  }
+}
+
+// Usage
+const db = Database.getInstance({
+  host: 'localhost',
+  port: 5432,
+  database: 'myapp',
+  max: 20,
+});
+
+const users = await db.query<{ id: string; email: string }>('SELECT id, email FROM users');
+console.log(users);","Creating multiple database pool instances throughout the app, wasting connections and causing coordination bugs.",Low,Positive — reuses resources,"pg, mongoose, ioredis, better-sqlite3",https://refactoring.guru/design-patterns/singleton
+5,DI Container,Creational,"dependency injection, container, IoC, inversion of control","Manages object creation and dependency resolution through a container, enabling loose coupling and testability.","When applications have deep dependency graphs; when you want to swap implementations easily (e.g., test vs production); when using SOLID principles.","When the app is small and manual injection suffices; when the container magic hides too much and confuses the team.","import 'reflect-metadata';
+import { injectable, inject, container, singleton } from 'tsyringe';
+
+interface Logger {
+  info(message: string): void;
+  error(message: string, error?: Error): void;
+}
+
+interface UserRepository {
+  findById(id: string): Promise<{ id: string; name: string } | null>;
+}
+
+@singleton()
+class ConsoleLogger implements Logger {
+  info(message: string): void {
+    console.log(`[INFO] ${new Date().toISOString()} ${message}`);
+  }
+  error(message: string, error?: Error): void {
+    console.error(`[ERROR] ${new Date().toISOString()} ${message}`, error?.stack);
+  }
+}
+
+@injectable()
+class PostgresUserRepository implements UserRepository {
+  constructor(@inject('Logger') private logger: Logger) {}
+
+  async findById(id: string): Promise<{ id: string; name: string } | null> {
+    this.logger.info(`Fetching user ${id}`);
+    // Simulated database call
+    return { id, name: 'Alice' };
+  }
+}
+
+@injectable()
+class UserService {
+  constructor(
+    @inject('UserRepository') private userRepo: UserRepository,
+    @inject('Logger') private logger: Logger
+  ) {}
+
+  async getUser(id: string): Promise<{ id: string; name: string }> {
+    const user = await this.userRepo.findById(id);
+    if (!user) {
+      this.logger.error(`User not found: ${id}`);
+      throw new Error(`User ${id} not found`);
+    }
+    this.logger.info(`Retrieved user: ${user.name}`);
+    return user;
+  }
+}
+
+// Register dependencies
+container.register('Logger', { useClass: ConsoleLogger });
+container.register('UserRepository', { useClass: PostgresUserRepository });
+
+// Resolve
+const userService = container.resolve(UserService);
+const user = await userService.getUser('123');
+console.log(user);","Manually passing dependencies through deeply nested constructors, or using global imports that tightly couple modules.",High,Negligible,"tsyringe, inversify, awilix, typedi",https://github.com/microsoft/tsyringe
+6,Module Factory,Creational,"module, factory, configuration, plugin","Creates configurable module instances with encapsulated state, allowing different configurations for different contexts.","When modules need configuration before use; when creating plugins or SDK clients; when you want encapsulated state per instance.","When a single global module is sufficient; when configuration never varies.","interface RedisConfig {
+  host: string;
+  port: number;
+  password?: string;
+  db?: number;
+  keyPrefix?: string;
+}
+
+interface CacheModule {
+  get<T>(key: string): Promise<T | null>;
+  set<T>(key: string, value: T, ttlSeconds?: number): Promise<void>;
+  del(key: string): Promise<void>;
+  flush(): Promise<void>;
+}
+
+function createCacheModule(config: RedisConfig): CacheModule {
+  const prefix = config.keyPrefix ?? '';
+  const store = new Map<string, { value: string; expiresAt?: number }>();
+
+  function prefixedKey(key: string): string {
+    return `${prefix}${key}`;
+  }
+
+  function isExpired(entry: { expiresAt?: number }): boolean {
+    return entry.expiresAt !== undefined && Date.now() > entry.expiresAt;
+  }
+
+  return {
+    async get<T>(key: string): Promise<T | null> {
+      const entry = store.get(prefixedKey(key));
+      if (!entry || isExpired(entry)) {
+        if (entry) store.delete(prefixedKey(key));
+        return null;
+      }
+      return JSON.parse(entry.value) as T;
+    },
+
+    async set<T>(key: string, value: T, ttlSeconds?: number): Promise<void> {
+      store.set(prefixedKey(key), {
+        value: JSON.stringify(value),
+        expiresAt: ttlSeconds ? Date.now() + ttlSeconds * 1000 : undefined,
+      });
+    },
+
+    async del(key: string): Promise<void> {
+      store.delete(prefixedKey(key));
+    },
+
+    async flush(): Promise<void> {
+      for (const k of store.keys()) {
+        if (k.startsWith(prefix)) store.delete(k);
+      }
+    },
+  };
+}
+
+// Usage: separate caches for different concerns
+const sessionCache = createCacheModule({ host: 'localhost', port: 6379, keyPrefix: 'sess:' });
+const apiCache = createCacheModule({ host: 'localhost', port: 6379, keyPrefix: 'api:', db: 1 });
+
+await sessionCache.set('user-123', { role: 'admin' }, 3600);
+const session = await sessionCache.get<{ role: string }>('user-123');
+console.log(session);","Using a single shared global cache with manual key prefixing, risking key collisions and making it impossible to flush one context without affecting another.",Medium,Negligible,"ioredis, keyv, cache-manager",https://nodejs.org/api/modules.html
+7,Decorator (TS Decorators),Structural,"decorator, metadata, annotation, AOP","Adds behavior to classes, methods, or properties using TypeScript decorator syntax, enabling aspect-oriented programming.","When adding cross-cutting concerns (logging, validation, caching, authorization); when using frameworks that support decorators (NestJS, TypeORM).","When the team is unfamiliar with decorators; when simpler composition achieves the same result; when targeting environments without decorator support.","import 'reflect-metadata';
+
+// Retry decorator
+function Retry(maxAttempts: number, delayMs: number = 1000) {
+  return function (
+    target: object,
+    propertyKey: string,
+    descriptor: PropertyDescriptor
+  ): PropertyDescriptor {
+    const originalMethod = descriptor.value;
+
+    descriptor.value = async function (...args: unknown[]) {
+      let lastError: Error | undefined;
+      for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        try {
+          return await originalMethod.apply(this, args);
+        } catch (error) {
+          lastError = error as Error;
+          console.warn(
+            `${propertyKey} attempt ${attempt}/${maxAttempts} failed: ${lastError.message}`
+          );
+          if (attempt < maxAttempts) {
+            await new Promise((r) => setTimeout(r, delayMs * attempt));
+          }
+        }
+      }
+      throw lastError;
+    };
+
+    return descriptor;
+  };
+}
+
+// Timing decorator
+function Timed(
+  target: object,
+  propertyKey: string,
+  descriptor: PropertyDescriptor
+): PropertyDescriptor {
+  const originalMethod = descriptor.value;
+
+  descriptor.value = async function (...args: unknown[]) {
+    const start = performance.now();
+    try {
+      return await originalMethod.apply(this, args);
+    } finally {
+      const duration = (performance.now() - start).toFixed(2);
+      console.log(`${propertyKey} executed in ${duration}ms`);
+    }
+  };
+
+  return descriptor;
+}
+
+class PaymentService {
+  @Retry(3, 500)
+  @Timed
+  async processPayment(amount: number, currency: string): Promise<{ txId: string }> {
+    const response = await fetch('https://api.payments.example.com/charge', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ amount, currency }),
+    });
+    if (!response.ok) throw new Error(`Payment failed: ${response.status}`);
+    return response.json();
+  }
+}
+
+// Usage
+const payments = new PaymentService();
+const result = await payments.processPayment(2999, 'USD');
+console.log(result.txId);","Wrapping functions with manual try/catch and timing logic in every method, creating massive code duplication across services.",Medium,Negligible,"reflect-metadata, @nestjs/common, class-validator",https://www.typescriptlang.org/docs/handbook/decorators.html
+8,Adapter,Structural,"adapter, wrapper, compatibility, integration","Converts the interface of a class or module into another interface that clients expect, enabling incompatible interfaces to work together.","When integrating third-party libraries with different APIs; when migrating between implementations; when wrapping legacy code.","When interfaces are already compatible; when the adaptation logic becomes too complex and a full rewrite is simpler.","interface EmailProvider {
+  sendEmail(options: {
+    to: string;
+    subject: string;
+    html: string;
+    from?: string;
+  }): Promise<{ messageId: string }>;
+}
+
+// SendGrid has its own API shape
+interface SendGridMessage {
+  personalizations: Array<{ to: Array<{ email: string }> }>;
+  from: { email: string };
+  subject: string;
+  content: Array<{ type: string; value: string }>;
+}
+
+class SendGridClient {
+  constructor(private apiKey: string) {}
+  async send(msg: SendGridMessage): Promise<{ statusCode: number; headers: { 'x-message-id': string } }> {
+    console.log(`SendGrid: sending to ${msg.personalizations[0].to[0].email}`);
+    return { statusCode: 202, headers: { 'x-message-id': 'sg-' + Date.now() } };
+  }
+}
+
+class SendGridAdapter implements EmailProvider {
+  private client: SendGridClient;
+
+  constructor(apiKey: string, private defaultFrom: string) {
+    this.client = new SendGridClient(apiKey);
+  }
+
+  async sendEmail(options: {
+    to: string;
+    subject: string;
+    html: string;
+    from?: string;
+  }): Promise<{ messageId: string }> {
+    const msg: SendGridMessage = {
+      personalizations: [{ to: [{ email: options.to }] }],
+      from: { email: options.from ?? this.defaultFrom },
+      subject: options.subject,
+      content: [{ type: 'text/html', value: options.html }],
+    };
+
+    const response = await this.client.send(msg);
+    if (response.statusCode >= 400) {
+      throw new Error(`SendGrid error: ${response.statusCode}`);
+    }
+    return { messageId: response.headers['x-message-id'] };
+  }
+}
+
+// Usage - consumer only knows EmailProvider interface
+async function sendWelcomeEmail(provider: EmailProvider, userEmail: string): Promise<void> {
+  const result = await provider.sendEmail({
+    to: userEmail,
+    subject: 'Welcome!',
+    html: '<h1>Welcome to our platform!</h1>',
+  });
+  console.log(`Sent welcome email: ${result.messageId}`);
+}
+
+const emailProvider: EmailProvider = new SendGridAdapter('sg-api-key', 'noreply@example.com');
+await sendWelcomeEmail(emailProvider, 'user@example.com');","Scattering provider-specific API calls throughout application code, making it impossible to switch providers without a massive refactor.",Medium,Negligible,"@sendgrid/mail, nodemailer, aws-sdk",https://refactoring.guru/design-patterns/adapter
+9,Facade,Structural,"facade, simplification, subsystem, API","Provides a simplified, unified interface to a complex subsystem, hiding internal complexity from consumers.","When a subsystem has many interacting classes; when you want to provide a simple API for common use cases; when decoupling clients from subsystem internals.","When clients need fine-grained access to subsystem details; when the facade becomes a god object with too many responsibilities.","interface OrderRequest {
+  userId: string;
+  items: Array<{ productId: string; quantity: number }>;
+  paymentMethodId: string;
+  shippingAddress: { street: string; city: string; zip: string; country: string };
+}
+
+interface OrderResult {
+  orderId: string;
+  total: number;
+  estimatedDelivery: Date;
+}
+
+// Complex subsystem classes
+class InventoryService {
+  async checkAndReserve(items: Array<{ productId: string; quantity: number }>): Promise<boolean> {
+    console.log(`Checking inventory for ${items.length} items`);
+    return true;
+  }
+  async releaseReservation(items: Array<{ productId: string; quantity: number }>): Promise<void> {
+    console.log('Released reservation');
+  }
+}
+
+class PricingService {
+  async calculateTotal(items: Array<{ productId: string; quantity: number }>): Promise<number> {
+    return items.reduce((sum, item) => sum + item.quantity * 29.99, 0);
+  }
+}
+
+class PaymentGateway {
+  async charge(paymentMethodId: string, amount: number): Promise<{ transactionId: string }> {
+    return { transactionId: `txn_${Date.now()}` };
+  }
+  async refund(transactionId: string): Promise<void> {
+    console.log(`Refunded ${transactionId}`);
+  }
+}
+
+class ShippingService {
+  async createShipment(address: OrderRequest['shippingAddress'], items: OrderRequest['items']): Promise<{ trackingId: string; estimatedDelivery: Date }> {
+    return { trackingId: `ship_${Date.now()}`, estimatedDelivery: new Date(Date.now() + 5 * 86400000) };
+  }
+}
+
+// Facade
+class OrderFacade {
+  constructor(
+    private inventory: InventoryService,
+    private pricing: PricingService,
+    private payment: PaymentGateway,
+    private shipping: ShippingService
+  ) {}
+
+  async placeOrder(request: OrderRequest): Promise<OrderResult> {
+    const available = await this.inventory.checkAndReserve(request.items);
+    if (!available) throw new Error('Items not available');
+
+    const total = await this.pricing.calculateTotal(request.items);
+
+    let transactionId: string;
+    try {
+      const charge = await this.payment.charge(request.paymentMethodId, total);
+      transactionId = charge.transactionId;
+    } catch (err) {
+      await this.inventory.releaseReservation(request.items);
+      throw new Error(`Payment failed: ${(err as Error).message}`);
+    }
+
+    const shipment = await this.shipping.createShipment(request.shippingAddress, request.items);
+
+    return {
+      orderId: `ord_${Date.now()}`,
+      total,
+      estimatedDelivery: shipment.estimatedDelivery,
+    };
+  }
+}
+
+// Usage
+const facade = new OrderFacade(new InventoryService(), new PricingService(), new PaymentGateway(), new ShippingService());
+const order = await facade.placeOrder({
+  userId: 'u-1',
+  items: [{ productId: 'p-1', quantity: 2 }],
+  paymentMethodId: 'pm-1',
+  shippingAddress: { street: '123 Main', city: 'NYC', zip: '10001', country: 'US' },
+});
+console.log(order);","Forcing consumers to manually orchestrate inventory, pricing, payment, and shipping calls in the correct order everywhere an order is placed.",High,Negligible,"stripe, @aws-sdk/client-s3",https://refactoring.guru/design-patterns/facade
+10,Proxy,Structural,"proxy, lazy loading, caching, access control","Provides a surrogate or placeholder for another object to control access, add caching, or implement lazy loading.","When you need lazy initialization of expensive resources; when adding caching in front of a service; when implementing access control checks.","When the extra indirection is not justified; when the real object is cheap to create and access.","interface HttpClient {
+  get<T>(url: string): Promise<T>;
+}
+
+interface CacheEntry<T> {
+  data: T;
+  expiresAt: number;
+}
+
+class RealHttpClient implements HttpClient {
+  async get<T>(url: string): Promise<T> {
+    const response = await fetch(url);
+    if (!response.ok) throw new Error(`HTTP ${response.status}: ${url}`);
+    return response.json() as Promise<T>;
+  }
+}
+
+class CachingProxy implements HttpClient {
+  private cache = new Map<string, CacheEntry<unknown>>();
+
+  constructor(
+    private client: HttpClient,
+    private ttlMs: number = 60_000
+  ) {}
+
+  async get<T>(url: string): Promise<T> {
+    const cached = this.cache.get(url);
+    if (cached && cached.expiresAt > Date.now()) {
+      console.log(`[CACHE HIT] ${url}`);
+      return cached.data as T;
+    }
+
+    console.log(`[CACHE MISS] ${url}`);
+    const data = await this.client.get<T>(url);
+    this.cache.set(url, { data, expiresAt: Date.now() + this.ttlMs });
+    return data;
+  }
+
+  invalidate(url: string): void {
+    this.cache.delete(url);
+  }
+
+  clearAll(): void {
+    this.cache.clear();
+  }
+}
+
+class LoggingProxy implements HttpClient {
+  constructor(private client: HttpClient) {}
+
+  async get<T>(url: string): Promise<T> {
+    const start = performance.now();
+    try {
+      const result = await this.client.get<T>(url);
+      console.log(`GET ${url} - ${(performance.now() - start).toFixed(0)}ms - OK`);
+      return result;
+    } catch (error) {
+      console.log(`GET ${url} - ${(performance.now() - start).toFixed(0)}ms - FAILED`);
+      throw error;
+    }
+  }
+}
+
+// Stack proxies: logging -> caching -> real client
+const client: HttpClient = new LoggingProxy(
+  new CachingProxy(new RealHttpClient(), 30_000)
+);
+
+// Both calls hit the same proxy chain; second call returns cached data
+const data1 = await client.get('https://api.example.com/users');
+const data2 = await client.get('https://api.example.com/users');
+console.log(data1, data2);","Embedding caching and logging logic directly inside the HTTP client class, violating single responsibility and making it impossible to toggle behaviors independently.",Medium,Positive — reduces redundant calls,"http-proxy-middleware, node-cache, lru-cache",https://refactoring.guru/design-patterns/proxy
+11,Module Pattern (Barrel Exports),Structural,"barrel, index, exports, public API, encapsulation","Uses index.ts files to re-export only the public API of a module, hiding internal implementation details.","When organizing library or module boundaries; when you want to control what consumers can import; when creating clean public APIs.","When a module is tiny with a single file; when barrel files cause circular dependency issues.","// file: src/auth/internals/hash.ts
+import { scrypt, randomBytes, timingSafeEqual } from 'crypto';
+import { promisify } from 'util';
+
+const scryptAsync = promisify(scrypt);
+
+export async function hashPassword(password: string): Promise<string> {
+  const salt = randomBytes(16).toString('hex');
+  const buf = (await scryptAsync(password, salt, 64)) as Buffer;
+  return `${buf.toString('hex')}.${salt}`;
+}
+
+export async function verifyPassword(password: string, hash: string): Promise<boolean> {
+  const [hashedPw, salt] = hash.split('.');
+  const buf = (await scryptAsync(password, salt, 64)) as Buffer;
+  return timingSafeEqual(buf, Buffer.from(hashedPw, 'hex'));
+}
+
+// file: src/auth/internals/token.ts
+import { randomBytes } from 'crypto';
+
+export function generateToken(length: number = 32): string {
+  return randomBytes(length).toString('base64url');
+}
+
+// file: src/auth/auth.service.ts
+import { hashPassword, verifyPassword } from './internals/hash';
+import { generateToken } from './internals/token';
+
+export class AuthService {
+  async register(email: string, password: string): Promise<{ token: string }> {
+    const hash = await hashPassword(password);
+    console.log(`Registered ${email} with hash ${hash.slice(0, 10)}...`);
+    return { token: generateToken() };
+  }
+
+  async login(email: string, password: string, storedHash: string): Promise<{ token: string }> {
+    const valid = await verifyPassword(password, storedHash);
+    if (!valid) throw new Error('Invalid credentials');
+    return { token: generateToken() };
+  }
+}
+
+// file: src/auth/index.ts (barrel)
+export { AuthService } from './auth.service';
+// Internals are NOT exported - hash.ts and token.ts stay private
+
+// Consumer only sees the clean public API:
+// import { AuthService } from './auth';","Exposing every internal helper and utility from a module, allowing consumers to depend on implementation details that break on refactoring.",Low,Negligible,eslint-plugin-import,https://www.typescriptlang.org/docs/handbook/modules.html
+12,Composite,Structural,"composite, tree, hierarchy, recursive","Composes objects into tree structures to represent part-whole hierarchies, letting clients treat individual objects and compositions uniformly.","When you need to represent hierarchies (file systems, menus, org charts); when clients should treat leaves and branches the same way.","When the hierarchy is flat; when composite operations do not make sense for leaf nodes.","interface PermissionNode {
+  readonly name: string;
+  check(userPermissions: Set<string>): boolean;
+  list(): string[];
+}
+
+class Permission implements PermissionNode {
+  constructor(readonly name: string) {}
+
+  check(userPermissions: Set<string>): boolean {
+    return userPermissions.has(this.name);
+  }
+
+  list(): string[] {
+    return [this.name];
+  }
+}
+
+class PermissionGroup implements PermissionNode {
+  private children: PermissionNode[] = [];
+
+  constructor(
+    readonly name: string,
+    private mode: 'all' | 'any' = 'all'
+  ) {}
+
+  add(...nodes: PermissionNode[]): this {
+    this.children.push(...nodes);
+    return this;
+  }
+
+  check(userPermissions: Set<string>): boolean {
+    if (this.children.length === 0) return true;
+    if (this.mode === 'all') {
+      return this.children.every((child) => child.check(userPermissions));
+    }
+    return this.children.some((child) => child.check(userPermissions));
+  }
+
+  list(): string[] {
+    return this.children.flatMap((child) => child.list());
+  }
+}
+
+// Build permission tree
+const adminPermissions = new PermissionGroup('admin', 'all')
+  .add(
+    new Permission('users:read'),
+    new Permission('users:write'),
+    new PermissionGroup('content-management', 'all')
+      .add(
+        new Permission('posts:read'),
+        new Permission('posts:write'),
+        new Permission('posts:delete')
+      )
+  );
+
+const editorPermissions = new PermissionGroup('editor', 'all')
+  .add(
+    new Permission('posts:read'),
+    new Permission('posts:write')
+  );
+
+// Check permissions uniformly
+const userPerms = new Set(['users:read', 'users:write', 'posts:read', 'posts:write', 'posts:delete']);
+console.log('Admin access:', adminPermissions.check(userPerms));   // true
+console.log('Editor access:', editorPermissions.check(userPerms)); // true
+console.log('All admin perms:', adminPermissions.list());","Using flat arrays of permission strings with complex nested conditional checks scattered across the codebase.",Medium,Negligible,"react (component tree), file-system utilities",https://refactoring.guru/design-patterns/composite
+13,Strategy,Behavioral,"strategy, algorithm, swap, interface, polymorphism","Defines a family of interchangeable algorithms behind a common interface, allowing the algorithm to vary independently from clients.","When you have multiple ways to perform an operation and want to switch between them; when you want to eliminate conditional branching on algorithm type.","When there is only one algorithm and no variation is expected; when the strategy interface is too broad.","interface CompressionStrategy {
+  compress(data: Buffer): Promise<Buffer>;
+  decompress(data: Buffer): Promise<Buffer>;
+  readonly encoding: string;
+}
+
+class GzipStrategy implements CompressionStrategy {
+  readonly encoding = 'gzip';
+
+  async compress(data: Buffer): Promise<Buffer> {
+    const { promisify } = await import('util');
+    const { gzip } = await import('zlib');
+    return promisify(gzip)(data);
+  }
+
+  async decompress(data: Buffer): Promise<Buffer> {
+    const { promisify } = await import('util');
+    const { gunzip } = await import('zlib');
+    return promisify(gunzip)(data);
+  }
+}
+
+class BrotliStrategy implements CompressionStrategy {
+  readonly encoding = 'br';
+
+  async compress(data: Buffer): Promise<Buffer> {
+    const { promisify } = await import('util');
+    const { brotliCompress } = await import('zlib');
+    return promisify(brotliCompress)(data);
+  }
+
+  async decompress(data: Buffer): Promise<Buffer> {
+    const { promisify } = await import('util');
+    const { brotliDecompress } = await import('zlib');
+    return promisify(brotliDecompress)(data);
+  }
+}
+
+class NoCompressionStrategy implements CompressionStrategy {
+  readonly encoding = 'identity';
+  async compress(data: Buffer): Promise<Buffer> { return data; }
+  async decompress(data: Buffer): Promise<Buffer> { return data; }
+}
+
+class FileProcessor {
+  constructor(private strategy: CompressionStrategy) {}
+
+  setStrategy(strategy: CompressionStrategy): void {
+    this.strategy = strategy;
+  }
+
+  async process(input: Buffer): Promise<{ data: Buffer; encoding: string; ratio: number }> {
+    const compressed = await this.strategy.compress(input);
+    const ratio = compressed.length / input.length;
+    return { data: compressed, encoding: this.strategy.encoding, ratio };
+  }
+
+  async restore(compressed: Buffer): Promise<Buffer> {
+    return this.strategy.decompress(compressed);
+  }
+}
+
+// Usage
+const processor = new FileProcessor(new GzipStrategy());
+const input = Buffer.from('Hello World!'.repeat(1000));
+const result = await processor.process(input);
+console.log(`${result.encoding}: ratio ${(result.ratio * 100).toFixed(1)}%`);
+
+processor.setStrategy(new BrotliStrategy());
+const result2 = await processor.process(input);
+console.log(`${result2.encoding}: ratio ${(result2.ratio * 100).toFixed(1)}%`);","Giant if/else or switch statements selecting compression logic inline, duplicating algorithm selection at every call site.",Medium,Varies by strategy,"passport (auth strategies), multer (storage strategies)",https://refactoring.guru/design-patterns/strategy
+14,Observer / EventEmitter,Behavioral,"observer, events, EventEmitter, pub-sub, reactive","Defines a one-to-many dependency so that when one object changes state, all dependents are notified and updated automatically.","When multiple components need to react to state changes; when you want loose coupling between producer and consumers; event-driven architectures.","When there are few listeners and direct calls are simpler; when event chains become hard to debug (event spaghetti).","import { EventEmitter } from 'events';
+
+interface OrderEvents {
+  'order:created': [order: { id: string; userId: string; total: number }];
+  'order:paid': [order: { id: string; transactionId: string }];
+  'order:shipped': [order: { id: string; trackingNumber: string }];
+  'order:failed': [order: { id: string; reason: string }];
+}
+
+class TypedEventEmitter<T extends Record<string, unknown[]>> {
+  private emitter = new EventEmitter();
+
+  on<K extends keyof T & string>(event: K, listener: (...args: T[K]) => void): this {
+    this.emitter.on(event, listener as (...args: unknown[]) => void);
+    return this;
+  }
+
+  off<K extends keyof T & string>(event: K, listener: (...args: T[K]) => void): this {
+    this.emitter.off(event, listener as (...args: unknown[]) => void);
+    return this;
+  }
+
+  emit<K extends keyof T & string>(event: K, ...args: T[K]): boolean {
+    return this.emitter.emit(event, ...args);
+  }
+
+  once<K extends keyof T & string>(event: K, listener: (...args: T[K]) => void): this {
+    this.emitter.once(event, listener as (...args: unknown[]) => void);
+    return this;
+  }
+}
+
+// Usage
+const orderBus = new TypedEventEmitter<OrderEvents>();
+
+// Subscriber: send confirmation email
+orderBus.on('order:created', (order) => {
+  console.log(`[Email] Sending confirmation for order ${order.id} to user ${order.userId}`);
+});
+
+// Subscriber: update analytics
+orderBus.on('order:created', (order) => {
+  console.log(`[Analytics] New order: $${order.total}`);
+});
+
+// Subscriber: notify shipping on payment
+orderBus.on('order:paid', (order) => {
+  console.log(`[Shipping] Preparing order ${order.id}, txn: ${order.transactionId}`);
+});
+
+// Publisher
+orderBus.emit('order:created', { id: 'ord-1', userId: 'u-1', total: 99.99 });
+orderBus.emit('order:paid', { id: 'ord-1', transactionId: 'txn-abc' });","Tight coupling where the order service directly calls email, analytics, and shipping services, making it impossible to add new reactions without modifying the core.",Low,Negligible,"events, eventemitter3, rxjs, mitt",https://nodejs.org/api/events.html
+15,Command,Behavioral,"command, undo, redo, queue, encapsulation","Encapsulates a request as an object, allowing parameterization, queuing, logging, and undo/redo of operations.","When you need undo/redo functionality; when operations should be queued or logged; when you want to decouple invocation from execution.","When operations are simple and do not need undo or queuing; when the command objects add unnecessary complexity.","interface Command {
+  execute(): Promise<void>;
+  undo(): Promise<void>;
+  describe(): string;
+}
+
+interface TextDocument {
+  content: string;
+}
+
+class InsertTextCommand implements Command {
+  private previousContent = '';
+
+  constructor(
+    private doc: TextDocument,
+    private position: number,
+    private text: string
+  ) {}
+
+  async execute(): Promise<void> {
+    this.previousContent = this.doc.content;
+    this.doc.content =
+      this.doc.content.slice(0, this.position) +
+      this.text +
+      this.doc.content.slice(this.position);
+  }
+
+  async undo(): Promise<void> {
+    this.doc.content = this.previousContent;
+  }
+
+  describe(): string {
+    return `Insert ""${this.text}"" at position ${this.position}`;
+  }
+}
+
+class DeleteTextCommand implements Command {
+  private deletedText = '';
+
+  constructor(
+    private doc: TextDocument,
+    private position: number,
+    private length: number
+  ) {}
+
+  async execute(): Promise<void> {
+    this.deletedText = this.doc.content.slice(this.position, this.position + this.length);
+    this.doc.content =
+      this.doc.content.slice(0, this.position) +
+      this.doc.content.slice(this.position + this.length);
+  }
+
+  async undo(): Promise<void> {
+    this.doc.content =
+      this.doc.content.slice(0, this.position) +
+      this.deletedText +
+      this.doc.content.slice(this.position);
+  }
+
+  describe(): string {
+    return `Delete ${this.length} chars at position ${this.position}`;
+  }
+}
+
+class CommandHistory {
+  private executed: Command[] = [];
+  private undone: Command[] = [];
+
+  async execute(command: Command): Promise<void> {
+    await command.execute();
+    this.executed.push(command);
+    this.undone = [];
+    console.log(`Executed: ${command.describe()}`);
+  }
+
+  async undo(): Promise<void> {
+    const command = this.executed.pop();
+    if (!command) throw new Error('Nothing to undo');
+    await command.undo();
+    this.undone.push(command);
+    console.log(`Undone: ${command.describe()}`);
+  }
+
+  async redo(): Promise<void> {
+    const command = this.undone.pop();
+    if (!command) throw new Error('Nothing to redo');
+    await command.execute();
+    this.executed.push(command);
+    console.log(`Redone: ${command.describe()}`);
+  }
+}
+
+// Usage
+const doc: TextDocument = { content: 'Hello World' };
+const history = new CommandHistory();
+
+await history.execute(new InsertTextCommand(doc, 5, ' Beautiful'));
+console.log(doc.content); // Hello Beautiful World
+
+await history.execute(new DeleteTextCommand(doc, 0, 6));
+console.log(doc.content); // Beautiful World
+
+await history.undo();
+console.log(doc.content); // Hello Beautiful World
+
+await history.redo();
+console.log(doc.content); // Beautiful World","Directly mutating state without recording operations, making undo impossible and debugging state changes a nightmare.",High,Negligible,"redux (actions as commands), ioredis (command queue)",https://refactoring.guru/design-patterns/command
+16,Middleware Chain,Behavioral,"middleware, chain, Express, Fastify, pipeline","Processes requests through a chain of handler functions, each able to modify context, short-circuit, or pass to the next handler.","When building HTTP servers; when cross-cutting concerns need to be composed; when request processing has multiple stages.","When the middleware chain becomes too long and hard to debug; when a simpler function composition suffices.","import { IncomingMessage, ServerResponse, createServer } from 'http';
+
+interface Context {
+  req: IncomingMessage;
+  res: ServerResponse;
+  state: Record<string, unknown>;
+  startTime?: number;
+}
+
+type NextFunction = () => Promise<void>;
+type Middleware = (ctx: Context, next: NextFunction) => Promise<void>;
+
+function compose(middlewares: Middleware[]): Middleware {
+  return async function (ctx: Context, next: NextFunction): Promise<void> {
+    let index = -1;
+
+    async function dispatch(i: number): Promise<void> {
+      if (i <= index) throw new Error('next() called multiple times');
+      index = i;
+      const fn = i < middlewares.length ? middlewares[i] : next;
+      await fn(ctx, () => dispatch(i + 1));
+    }
+
+    await dispatch(0);
+  };
+}
+
+// Middleware: request timing
+const timing: Middleware = async (ctx, next) => {
+  ctx.startTime = Date.now();
+  await next();
+  const duration = Date.now() - (ctx.startTime ?? 0);
+  ctx.res.setHeader('X-Response-Time', `${duration}ms`);
+  console.log(`${ctx.req.method} ${ctx.req.url} - ${duration}ms`);
+};
+
+// Middleware: error handling
+const errorHandler: Middleware = async (ctx, next) => {
+  try {
+    await next();
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Internal Server Error';
+    ctx.res.writeHead(500, { 'Content-Type': 'application/json' });
+    ctx.res.end(JSON.stringify({ error: message }));
+  }
+};
+
+// Middleware: body parser
+const bodyParser: Middleware = async (ctx, next) => {
+  if (ctx.req.method === 'POST' || ctx.req.method === 'PUT') {
+    const chunks: Buffer[] = [];
+    for await (const chunk of ctx.req) chunks.push(chunk as Buffer);
+    ctx.state.body = JSON.parse(Buffer.concat(chunks).toString());
+  }
+  await next();
+};
+
+// Handler
+const handler: Middleware = async (ctx) => {
+  ctx.res.writeHead(200, { 'Content-Type': 'application/json' });
+  ctx.res.end(JSON.stringify({ message: 'OK', path: ctx.req.url }));
+};
+
+// Compose and run
+const app = compose([errorHandler, timing, bodyParser, handler]);
+const server = createServer(async (req, res) => {
+  const ctx: Context = { req, res, state: {} };
+  await app(ctx, async () => {});
+});
+
+server.listen(3000, () => console.log('Server on :3000'));","Embedding logging, auth, parsing, and error handling all in a single monolithic request handler function.",Medium,Negligible,"express, koa, fastify, hono",https://expressjs.com/en/guide/using-middleware.html
+17,Pipeline (Streams),Behavioral,"pipeline, streams, transform, ETL, data processing","Processes data through a sequence of transformation stages using Node.js Streams, enabling efficient memory usage for large datasets.","When processing large files or data streams; when building ETL pipelines; when memory efficiency matters.","When data fits comfortably in memory; when the pipeline adds complexity without performance benefit.","import { Transform, Readable, pipeline as streamPipeline } from 'stream';
+import { promisify } from 'util';
+
+const pipelineAsync = promisify(streamPipeline);
+
+interface LogEntry {
+  timestamp: string;
+  level: string;
+  message: string;
+  service: string;
+}
+
+// Stage 1: Parse JSON lines
+class JsonParser extends Transform {
+  constructor() {
+    super({ objectMode: true });
+  }
+
+  _transform(chunk: Buffer, _encoding: string, callback: (err?: Error | null, data?: LogEntry) => void): void {
+    try {
+      const entry = JSON.parse(chunk.toString().trim()) as LogEntry;
+      callback(null, entry);
+    } catch {
+      callback(); // Skip malformed lines
+    }
+  }
+}
+
+// Stage 2: Filter by level
+class LevelFilter extends Transform {
+  constructor(private minLevel: string) {
+    super({ objectMode: true });
+  }
+
+  private readonly levelOrder: Record<string, number> = {
+    debug: 0, info: 1, warn: 2, error: 3, fatal: 4,
+  };
+
+  _transform(entry: LogEntry, _encoding: string, callback: (err?: Error | null, data?: LogEntry) => void): void {
+    const entryLevel = this.levelOrder[entry.level] ?? 0;
+    const minLevel = this.levelOrder[this.minLevel] ?? 0;
+    if (entryLevel >= minLevel) {
+      callback(null, entry);
+    } else {
+      callback();
+    }
+  }
+}
+
+// Stage 3: Format output
+class Formatter extends Transform {
+  constructor() {
+    super({ objectMode: true, writableObjectMode: true });
+  }
+
+  _transform(entry: LogEntry, _encoding: string, callback: (err?: Error | null, data?: string) => void): void {
+    const line = `[${entry.timestamp}] [${entry.level.toUpperCase()}] [${entry.service}] ${entry.message}\n`;
+    callback(null, line);
+  }
+}
+
+// Usage: process log entries through pipeline
+const logs = [
+  '{ ""timestamp"": ""2024-01-01T00:00:00Z"", ""level"": ""debug"", ""message"": ""Starting up"", ""service"": ""api"" }',
+  '{ ""timestamp"": ""2024-01-01T00:00:01Z"", ""level"": ""info"", ""message"": ""Server listening on 3000"", ""service"": ""api"" }',
+  '{ ""timestamp"": ""2024-01-01T00:00:02Z"", ""level"": ""error"", ""message"": ""Database connection failed"", ""service"": ""db"" }',
+  '{ ""timestamp"": ""2024-01-01T00:00:03Z"", ""level"": ""warn"", ""message"": ""High memory usage"", ""service"": ""api"" }',
+];
+
+const source = Readable.from(logs.map((l) => l + '\n'));
+
+await pipelineAsync(
+  source,
+  new JsonParser(),
+  new LevelFilter('warn'),
+  new Formatter(),
+  process.stdout
+);","Loading entire large files into memory, parsing everything at once, and filtering afterward, causing out-of-memory crashes on large datasets.",High,Positive — constant memory usage,"stream, through2, csv-parse, ndjson",https://nodejs.org/api/stream.html
+18,Chain of Responsibility,Behavioral,"chain, handler, responsibility, validation, processing","Passes a request along a chain of handlers, where each handler decides to process the request or pass it to the next handler.","When multiple handlers can process a request; when the handler chain should be configurable at runtime; when you want to decouple senders from receivers.","When a single handler always handles the request; when the chain ordering becomes fragile and hard to debug.","interface ValidationResult {
+  valid: boolean;
+  errors: string[];
+}
+
+interface RegistrationData {
+  email: string;
+  password: string;
+  username: string;
+  age: number;
+}
+
+abstract class ValidationHandler {
+  private nextHandler: ValidationHandler | null = null;
+
+  setNext(handler: ValidationHandler): ValidationHandler {
+    this.nextHandler = handler;
+    return handler;
+  }
+
+  async validate(data: RegistrationData, errors: string[]): Promise<string[]> {
+    await this.check(data, errors);
+    if (this.nextHandler) {
+      return this.nextHandler.validate(data, errors);
+    }
+    return errors;
+  }
+
+  protected abstract check(data: RegistrationData, errors: string[]): Promise<void>;
+}
+
+class EmailValidationHandler extends ValidationHandler {
+  protected async check(data: RegistrationData, errors: string[]): Promise<void> {
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(data.email)) {
+      errors.push('Invalid email format');
+    }
+  }
+}
+
+class PasswordStrengthHandler extends ValidationHandler {
+  protected async check(data: RegistrationData, errors: string[]): Promise<void> {
+    if (data.password.length < 8) {
+      errors.push('Password must be at least 8 characters');
+    }
+    if (!/[A-Z]/.test(data.password)) {
+      errors.push('Password must contain an uppercase letter');
+    }
+    if (!/[0-9]/.test(data.password)) {
+      errors.push('Password must contain a digit');
+    }
+  }
+}
+
+class UsernameValidationHandler extends ValidationHandler {
+  private reserved = new Set(['admin', 'root', 'system', 'moderator']);
+
+  protected async check(data: RegistrationData, errors: string[]): Promise<void> {
+    if (data.username.length < 3 || data.username.length > 20) {
+      errors.push('Username must be 3-20 characters');
+    }
+    if (!/^[a-zA-Z0-9_]+$/.test(data.username)) {
+      errors.push('Username can only contain letters, numbers, and underscores');
+    }
+    if (this.reserved.has(data.username.toLowerCase())) {
+      errors.push('Username is reserved');
+    }
+  }
+}
+
+class AgeValidationHandler extends ValidationHandler {
+  protected async check(data: RegistrationData, errors: string[]): Promise<void> {
+    if (!Number.isInteger(data.age) || data.age < 13 || data.age > 150) {
+      errors.push('Age must be an integer between 13 and 150');
+    }
+  }
+}
+
+// Build chain
+const emailValidator = new EmailValidationHandler();
+emailValidator
+  .setNext(new PasswordStrengthHandler())
+  .setNext(new UsernameValidationHandler())
+  .setNext(new AgeValidationHandler());
+
+// Usage
+const errors = await emailValidator.validate(
+  { email: 'bad-email', password: 'short', username: 'admin', age: 10 },
+  []
+);
+console.log(errors.length === 0 ? 'Valid!' : `Errors: ${errors.join('; ')}`);","A single massive validation function with dozens of nested if-statements, making it impossible to reuse or reorder individual checks.",Medium,Negligible,"express-validator, joi, celebrate",https://refactoring.guru/design-patterns/chain-of-responsibility
+19,Async Iterator,Behavioral,"async iterator, generator, lazy, pagination, streaming","Produces values asynchronously on demand using async generators, enabling lazy evaluation of async data sequences.","When fetching paginated API data; when processing items one at a time from a stream; when you want backpressure-aware lazy sequences.","When all data is already available in memory; when the overhead of async iteration is not justified for small collections.","interface Page<T> {
+  data: T[];
+  cursor: string | null;
+}
+
+interface User {
+  id: string;
+  name: string;
+  email: string;
+}
+
+// Simulated paginated API
+async function fetchUsersPage(cursor: string | null, limit: number): Promise<Page<User>> {
+  // Simulate API call
+  const pageNum = cursor ? parseInt(cursor, 10) : 0;
+  const users: User[] = Array.from({ length: limit }, (_, i) => ({
+    id: `user-${pageNum * limit + i}`,
+    name: `User ${pageNum * limit + i}`,
+    email: `user${pageNum * limit + i}@example.com`,
+  }));
+
+  const hasMore = pageNum < 4; // 5 pages total
+  return {
+    data: users,
+    cursor: hasMore ? String(pageNum + 1) : null,
+  };
+}
+
+// Async generator for paginated data
+async function* paginatedUsers(pageSize: number = 10): AsyncGenerator<User, void, undefined> {
+  let cursor: string | null = null;
+
+  do {
+    const page = await fetchUsersPage(cursor, pageSize);
+    for (const user of page.data) {
+      yield user;
+    }
+    cursor = page.cursor;
+  } while (cursor !== null);
+}
+
+// Transform: async filter
+async function* asyncFilter<T>(
+  source: AsyncIterable<T>,
+  predicate: (item: T) => boolean | Promise<boolean>
+): AsyncGenerator<T> {
+  for await (const item of source) {
+    if (await predicate(item)) {
+      yield item;
+    }
+  }
+}
+
+// Transform: async take
+async function* asyncTake<T>(source: AsyncIterable<T>, count: number): AsyncGenerator<T> {
+  let taken = 0;
+  for await (const item of source) {
+    if (taken >= count) return;
+    yield item;
+    taken++;
+  }
+}
+
+// Usage: lazily paginate, filter, and take
+const evenUsers = asyncFilter(paginatedUsers(10), (u) => parseInt(u.id.split('-')[1]) % 2 === 0);
+const firstTen = asyncTake(evenUsers, 10);
+
+for await (const user of firstTen) {
+  console.log(`${user.id}: ${user.name}`);
+}","Fetching all pages eagerly into a massive array before processing, wasting memory and delaying time-to-first-result.",Medium,Positive — lazy memory usage,"@databases/pg, mongoose cursor, node-fetch",https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/for-await...of
+20,State Machine,Behavioral,"state machine, finite state, transition, workflow","Models an object that changes behavior when its internal state changes, with explicit state transitions and guards.","When modeling workflows (orders, payments, approvals); when state transitions have rules and side effects; when you need audit trails.","When state logic is trivially simple (boolean toggle); when the number of states is very small and unlikely to grow.","type OrderState = 'draft' | 'submitted' | 'paid' | 'shipped' | 'delivered' | 'cancelled';
+
+type OrderEvent =
+  | { type: 'SUBMIT' }
+  | { type: 'PAY'; transactionId: string }
+  | { type: 'SHIP'; trackingNumber: string }
+  | { type: 'DELIVER' }
+  | { type: 'CANCEL'; reason: string };
+
+interface OrderContext {
+  orderId: string;
+  state: OrderState;
+  transactionId?: string;
+  trackingNumber?: string;
+  cancelReason?: string;
+  history: Array<{ from: OrderState; to: OrderState; event: string; at: Date }>;
+}
+
+type TransitionMap = {
+  [S in OrderState]?: {
+    [E in OrderEvent['type']]?: {
+      target: OrderState;
+      guard?: (ctx: OrderContext, event: OrderEvent) => boolean;
+      action?: (ctx: OrderContext, event: OrderEvent) => void;
+    };
+  };
+};
+
+const transitions: TransitionMap = {
+  draft: {
+    SUBMIT: { target: 'submitted' },
+    CANCEL: {
+      target: 'cancelled',
+      action: (ctx, event) => {
+        if (event.type === 'CANCEL') ctx.cancelReason = event.reason;
+      },
+    },
+  },
+  submitted: {
+    PAY: {
+      target: 'paid',
+      action: (ctx, event) => {
+        if (event.type === 'PAY') ctx.transactionId = event.transactionId;
+      },
+    },
+    CANCEL: {
+      target: 'cancelled',
+      action: (ctx, event) => {
+        if (event.type === 'CANCEL') ctx.cancelReason = event.reason;
+      },
+    },
+  },
+  paid: {
+    SHIP: {
+      target: 'shipped',
+      action: (ctx, event) => {
+        if (event.type === 'SHIP') ctx.trackingNumber = event.trackingNumber;
+      },
+    },
+  },
+  shipped: {
+    DELIVER: { target: 'delivered' },
+  },
+};
+
+function sendEvent(ctx: OrderContext, event: OrderEvent): OrderContext {
+  const stateTransitions = transitions[ctx.state];
+  if (!stateTransitions) throw new Error(`No transitions from state: ${ctx.state}`);
+
+  const transition = stateTransitions[event.type];
+  if (!transition) throw new Error(`Invalid event ${event.type} in state ${ctx.state}`);
+
+  if (transition.guard && !transition.guard(ctx, event)) {
+    throw new Error(`Guard rejected ${event.type} in state ${ctx.state}`);
+  }
+
+  const from = ctx.state;
+  ctx.state = transition.target;
+  transition.action?.(ctx, event);
+  ctx.history.push({ from, to: ctx.state, event: event.type, at: new Date() });
+
+  return ctx;
+}
+
+// Usage
+let order: OrderContext = { orderId: 'ord-1', state: 'draft', history: [] };
+order = sendEvent(order, { type: 'SUBMIT' });
+order = sendEvent(order, { type: 'PAY', transactionId: 'txn-123' });
+order = sendEvent(order, { type: 'SHIP', trackingNumber: 'TRACK-456' });
+order = sendEvent(order, { type: 'DELIVER' });
+console.log('Final state:', order.state);
+console.log('History:', order.history);","Using scattered boolean flags (isPaid, isShipped, isCancelled) with inconsistent checking logic, allowing impossible state combinations.",High,Negligible,"xstate, robot, stately",https://xstate.js.org/docs/
+21,Discriminated Unions,TypeScript-Specific,"discriminated union, tagged union, type narrowing, ADT","Uses a common literal property (discriminant) to distinguish between union members, enabling exhaustive type-safe handling.","When modeling values that can be one of several shapes; when you need exhaustive switch/case handling; when replacing class hierarchies.","When there is only one shape; when the discriminant adds no clarity.","type Shape =
+  | { kind: 'circle'; radius: number }
+  | { kind: 'rectangle'; width: number; height: number }
+  | { kind: 'triangle'; base: number; height: number };
+
+function calculateArea(shape: Shape): number {
+  switch (shape.kind) {
+    case 'circle':
+      return Math.PI * shape.radius ** 2;
+    case 'rectangle':
+      return shape.width * shape.height;
+    case 'triangle':
+      return (shape.base * shape.height) / 2;
+    default: {
+      // Exhaustiveness check: if a new shape is added without handling,
+      // this line will produce a compile-time error.
+      const _exhaustive: never = shape;
+      throw new Error(`Unknown shape: ${JSON.stringify(_exhaustive)}`);
+    }
+  }
+}
+
+function describeShape(shape: Shape): string {
+  switch (shape.kind) {
+    case 'circle':
+      return `Circle with radius ${shape.radius}`;
+    case 'rectangle':
+      return `Rectangle ${shape.width}x${shape.height}`;
+    case 'triangle':
+      return `Triangle base=${shape.base} height=${shape.height}`;
+  }
+}
+
+// Usage
+const shapes: Shape[] = [
+  { kind: 'circle', radius: 5 },
+  { kind: 'rectangle', width: 10, height: 3 },
+  { kind: 'triangle', base: 6, height: 4 },
+];
+
+for (const s of shapes) {
+  console.log(`${describeShape(s)}: area = ${calculateArea(s).toFixed(2)}`);
+}","Using a single object with many optional fields and checking which ones are defined, leading to runtime errors when fields are unexpectedly undefined.",Low,Negligible,typescript (built-in),https://www.typescriptlang.org/docs/handbook/2/narrowing.html#discriminated-unions
+22,Type Guards,TypeScript-Specific,"type guard, narrowing, runtime check, is keyword","Runtime functions that narrow a value's type within a conditional block, bridging the gap between runtime checks and compile-time types.","When working with unknown data (API responses, user input); when narrowing union types; when custom validation logic determines the type.","When the type is already known at compile time; when simple typeof or instanceof checks suffice without a custom guard.","interface ApiSuccessResponse<T> {
+  status: 'success';
+  data: T;
+  timestamp: string;
+}
+
+interface ApiErrorResponse {
+  status: 'error';
+  error: {
+    code: string;
+    message: string;
+    details?: Record<string, string[]>;
+  };
+  timestamp: string;
+}
+
+type ApiResponse<T> = ApiSuccessResponse<T> | ApiErrorResponse;
+
+// Type guard for API response
+function isApiError<T>(response: ApiResponse<T>): response is ApiErrorResponse {
+  return response.status === 'error';
+}
+
+// Type guard for non-null
+function isNotNull<T>(value: T | null | undefined): value is T {
+  return value !== null && value !== undefined;
+}
+
+// Type guard with validation for unknown data
+interface UserProfile {
+  id: string;
+  email: string;
+  age: number;
+}
+
+function isUserProfile(value: unknown): value is UserProfile {
+  if (typeof value !== 'object' || value === null) return false;
+  const obj = value as Record<string, unknown>;
+  return (
+    typeof obj.id === 'string' &&
+    typeof obj.email === 'string' &&
+    typeof obj.age === 'number' &&
+    Number.isInteger(obj.age) &&
+    obj.age >= 0
+  );
+}
+
+// Assertion function (throws if invalid)
+function assertIsUserProfile(value: unknown): asserts value is UserProfile {
+  if (!isUserProfile(value)) {
+    throw new TypeError(`Invalid UserProfile: ${JSON.stringify(value)}`);
+  }
+}
+
+// Usage
+async function fetchUser(id: string): Promise<UserProfile> {
+  const response: ApiResponse<unknown> = {
+    status: 'success',
+    data: { id, email: 'alice@example.com', age: 30 },
+    timestamp: new Date().toISOString(),
+  };
+
+  if (isApiError(response)) {
+    throw new Error(`API error: ${response.error.message}`);
+  }
+
+  // response is narrowed to ApiSuccessResponse<unknown>
+  assertIsUserProfile(response.data);
+
+  // response.data is now UserProfile
+  console.log(`Fetched user: ${response.data.email}, age: ${response.data.age}`);
+  return response.data;
+}
+
+// Filter nulls type-safely
+const maybeUsers: (UserProfile | null)[] = [
+  { id: '1', email: 'a@b.com', age: 25 },
+  null,
+  { id: '2', email: 'c@d.com', age: 30 },
+];
+const users: UserProfile[] = maybeUsers.filter(isNotNull);
+console.log(users);
+await fetchUser('1');","Using 'as' type assertions everywhere to silence the compiler without actual runtime validation, leading to crashes on unexpected data.",Low,Negligible,typescript (built-in),https://www.typescriptlang.org/docs/handbook/2/narrowing.html
+23,Branded Types,TypeScript-Specific,"branded type, nominal, opaque, type safety","Creates nominally typed values in TypeScript's structural type system by adding a phantom brand property, preventing accidental misuse of structurally identical types.","When string or number IDs for different entities should not be interchangeable; when you want compile-time prevention of argument swapping.","When there is only one kind of ID; when the branding ceremony adds friction without real safety benefit.","declare const __brand: unique symbol;
+
+type Brand<T, B extends string> = T & { readonly [__brand]: B };
+
+type UserId = Brand<string, 'UserId'>;
+type OrderId = Brand<string, 'OrderId'>;
+type Email = Brand<string, 'Email'>;
+type PositiveInt = Brand<number, 'PositiveInt'>;
+
+// Smart constructors with validation
+function UserId(id: string): UserId {
+  if (!id.startsWith('usr_')) {
+    throw new Error(`Invalid UserId format: ${id}`);
+  }
+  return id as UserId;
+}
+
+function OrderId(id: string): OrderId {
+  if (!id.startsWith('ord_')) {
+    throw new Error(`Invalid OrderId format: ${id}`);
+  }
+  return id as OrderId;
+}
+
+function Email(value: string): Email {
+  const regex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  if (!regex.test(value)) {
+    throw new Error(`Invalid email: ${value}`);
+  }
+  return value.toLowerCase() as Email;
+}
+
+function PositiveInt(value: number): PositiveInt {
+  if (!Number.isInteger(value) || value <= 0) {
+    throw new Error(`Not a positive integer: ${value}`);
+  }
+  return value as PositiveInt;
+}
+
+// Functions that require specific branded types
+function getUser(id: UserId): { id: UserId; name: string } {
+  return { id, name: 'Alice' };
+}
+
+function getOrder(id: OrderId): { id: OrderId; total: PositiveInt } {
+  return { id, total: PositiveInt(4999) };
+}
+
+function sendEmail(to: Email, subject: string): void {
+  console.log(`Sending ""${subject}"" to ${to}`);
+}
+
+// Usage
+const userId = UserId('usr_123');
+const orderId = OrderId('ord_456');
+const email = Email('alice@example.com');
+
+const user = getUser(userId);
+const order = getOrder(orderId);
+sendEmail(email, 'Your order has shipped');
+
+// These would be compile errors:
+// getUser(orderId);        // Error: OrderId is not assignable to UserId
+// getOrder(userId);        // Error: UserId is not assignable to OrderId
+// sendEmail('not-email', 'test'); // Error: string is not assignable to Email
+
+console.log(user, order);","Using plain strings for all IDs, allowing getUserById(orderId) to compile and cause silent bugs at runtime.",Low,Negligible,typescript (built-in),https://www.typescriptlang.org/docs/handbook/2/types-from-types.html
+24,Zod Schema Pattern,TypeScript-Specific,"zod, schema, validation, runtime, compile-time","Defines schemas that provide both runtime validation and compile-time type inference, creating a single source of truth for data shapes.","When validating API inputs, environment variables, or external data; when you want the type and validation to stay in sync automatically.","When data is already validated upstream; when adding a schema library is too heavy for the project.","import { z } from 'zod';
+
+// Define schemas (single source of truth)
+const AddressSchema = z.object({
+  street: z.string().min(1),
+  city: z.string().min(1),
+  state: z.string().length(2),
+  zip: z.string().regex(/^\d{5}(-\d{4})?$/),
+  country: z.string().default('US'),
+});
+
+const CreateOrderSchema = z.object({
+  customerId: z.string().uuid(),
+  items: z
+    .array(
+      z.object({
+        productId: z.string().uuid(),
+        quantity: z.number().int().positive().max(100),
+        priceOverride: z.number().positive().optional(),
+      })
+    )
+    .min(1)
+    .max(50),
+  shippingAddress: AddressSchema,
+  notes: z.string().max(500).optional(),
+  priority: z.enum(['standard', 'express', 'overnight']).default('standard'),
+});
+
+// Infer TypeScript types from schemas
+type Address = z.infer<typeof AddressSchema>;
+type CreateOrderInput = z.infer<typeof CreateOrderSchema>;
+
+// Environment config schema
+const EnvSchema = z.object({
+  NODE_ENV: z.enum(['development', 'staging', 'production']),
+  PORT: z.coerce.number().int().min(1).max(65535).default(3000),
+  DATABASE_URL: z.string().url(),
+  REDIS_URL: z.string().url().optional(),
+  LOG_LEVEL: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
+});
+
+type Env = z.infer<typeof EnvSchema>;
+
+function loadEnv(): Env {
+  const result = EnvSchema.safeParse(process.env);
+  if (!result.success) {
+    console.error('Invalid environment variables:');
+    for (const issue of result.error.issues) {
+      console.error(`  ${issue.path.join('.')}: ${issue.message}`);
+    }
+    process.exit(1);
+  }
+  return result.data;
+}
+
+// Request handler using schema validation
+async function handleCreateOrder(rawBody: unknown): Promise<{ orderId: string }> {
+  const input = CreateOrderSchema.parse(rawBody);
+  // input is fully typed as CreateOrderInput
+  console.log(`Creating order for customer ${input.customerId}`);
+  console.log(`Items: ${input.items.length}, Priority: ${input.priority}`);
+  console.log(`Ship to: ${input.shippingAddress.city}, ${input.shippingAddress.state}`);
+  return { orderId: `ord_${Date.now()}` };
+}
+
+// Usage
+const order = await handleCreateOrder({
+  customerId: 'a1b2c3d4-e5f6-7890-abcd-ef1234567890',
+  items: [{ productId: 'f1e2d3c4-b5a6-7890-abcd-ef1234567890', quantity: 2 }],
+  shippingAddress: { street: '123 Main St', city: 'NYC', state: 'NY', zip: '10001' },
+  priority: 'express',
+});
+console.log(order);","Manually defining TypeScript interfaces AND separate validation functions that easily drift out of sync, causing runtime crashes on valid types or silent acceptance of invalid data.",Medium,Negligible — validation overhead minimal,"zod, valibot, arktype, typebox",https://zod.dev/
+25,satisfies Operator,TypeScript-Specific,"satisfies, type checking, inference, const assertion","Validates that an expression conforms to a type without widening the inferred type, preserving literal types and specific shapes.","When you want compile-time type checking but need to preserve narrower literal types; when configuring objects that must match an interface but you want autocomplete on specific keys.","When simple type annotations already provide what you need; when the distinction between satisfies and annotation does not matter.","interface RouteConfig {
+  path: string;
+  method: 'GET' | 'POST' | 'PUT' | 'DELETE';
+  auth: boolean;
+  rateLimit?: { windowMs: number; max: number };
+}
+
+// Using satisfies: validates structure but preserves literal types
+const routes = {
+  getUsers: {
+    path: '/api/users',
+    method: 'GET',
+    auth: true,
+    rateLimit: { windowMs: 60000, max: 100 },
+  },
+  createUser: {
+    path: '/api/users',
+    method: 'POST',
+    auth: true,
+    rateLimit: { windowMs: 60000, max: 10 },
+  },
+  getHealth: {
+    path: '/api/health',
+    method: 'GET',
+    auth: false,
+  },
+  updateUser: {
+    path: '/api/users/:id',
+    method: 'PUT',
+    auth: true,
+  },
+} satisfies Record<string, RouteConfig>;
+
+// Type is preserved: routes.getUsers.method is 'GET', not string
+type GetUsersMethod = (typeof routes.getUsers)['method']; // 'GET'
+
+// Autocomplete works for known keys
+const userRoute = routes.getUsers; // Fully typed with literal types
+
+// Theme configuration with satisfies
+interface ThemeColor {
+  light: string;
+  dark: string;
+}
+
+const palette = {
+  primary: { light: '#3B82F6', dark: '#60A5FA' },
+  secondary: { light: '#10B981', dark: '#34D399' },
+  danger: { light: '#EF4444', dark: '#F87171' },
+  warning: { light: '#F59E0B', dark: '#FBBF24' },
+} satisfies Record<string, ThemeColor>;
+
+// palette.primary is known at compile time (not just Record<string, ThemeColor>)
+type PaletteKeys = keyof typeof palette; // 'primary' | 'secondary' | 'danger' | 'warning'
+
+function getColor(colorName: PaletteKeys, mode: 'light' | 'dark'): string {
+  return palette[colorName][mode];
+}
+
+console.log(getColor('primary', 'dark'));
+console.log(`GET users path: ${routes.getUsers.path}`);
+console.log(`Method type: ${routes.getUsers.method}`);","Using 'as const' without type checking (no validation) or using explicit type annotations that widen literal types, losing autocomplete and specificity.",Low,Negligible,typescript (built-in),https://www.typescriptlang.org/docs/handbook/release-notes/typescript-4-9.html
+26,Template Literal Types,TypeScript-Specific,"template literal, string type, pattern, type manipulation","Uses template literal syntax at the type level to create, validate, and transform string types, enabling compile-time string pattern enforcement.","When modeling string patterns (CSS units, API routes, event names); when building type-safe string manipulation utilities; when enforcing naming conventions.","When simple string or string union types are sufficient; when the type complexity hurts readability.","// Event name pattern enforcement
+type EventCategory = 'user' | 'order' | 'payment';
+type EventAction = 'created' | 'updated' | 'deleted' | 'viewed';
+type EventName = `${EventCategory}:${EventAction}`;
+
+interface EventPayloads {
+  'user:created': { userId: string; email: string };
+  'user:updated': { userId: string; changes: Record<string, unknown> };
+  'user:deleted': { userId: string };
+  'user:viewed': { userId: string; viewerId: string };
+  'order:created': { orderId: string; total: number };
+  'order:updated': { orderId: string; status: string };
+  'order:deleted': { orderId: string };
+  'order:viewed': { orderId: string };
+  'payment:created': { paymentId: string; amount: number };
+  'payment:updated': { paymentId: string; status: string };
+  'payment:deleted': { paymentId: string };
+  'payment:viewed': { paymentId: string };
+}
+
+type EventHandler<E extends EventName> = (payload: EventPayloads[E]) => void;
+
+class TypedEventBus {
+  private handlers = new Map<string, Set<Function>>();
+
+  on<E extends EventName>(event: E, handler: EventHandler<E>): () => void {
+    if (!this.handlers.has(event)) {
+      this.handlers.set(event, new Set());
+    }
+    this.handlers.get(event)!.add(handler);
+    return () => this.handlers.get(event)?.delete(handler);
+  }
+
+  emit<E extends EventName>(event: E, payload: EventPayloads[E]): void {
+    const handlers = this.handlers.get(event);
+    if (handlers) {
+      for (const handler of handlers) {
+        (handler as EventHandler<E>)(payload);
+      }
+    }
+  }
+}
+
+// CSS unit types
+type CSSUnit = 'px' | 'rem' | 'em' | '%' | 'vh' | 'vw';
+type CSSValue = `${number}${CSSUnit}`;
+
+function setWidth(element: string, width: CSSValue): void {
+  console.log(`Setting ${element} width to ${width}`);
+}
+
+// Usage
+const bus = new TypedEventBus();
+
+bus.on('user:created', (payload) => {
+  // payload is typed as { userId: string; email: string }
+  console.log(`New user: ${payload.email}`);
+});
+
+bus.emit('user:created', { userId: 'u-1', email: 'alice@example.com' });
+
+// Type-safe CSS values
+setWidth('container', '100%');
+setWidth('sidebar', '20rem');
+// setWidth('main', '100');  // Error: '100' is not assignable to CSSValue","Using plain string types with no pattern enforcement, allowing invalid event names or CSS values to slip through to runtime.",Medium,Negligible,typescript (built-in),https://www.typescriptlang.org/docs/handbook/2/template-literal-types.html
+27,Mapped Types,TypeScript-Specific,"mapped type, transform, readonly, partial, utility","Transforms existing types programmatically by iterating over their keys, creating new types with modified properties.","When creating type utilities (Readonly, Partial, Pick variations); when building forms from models; when creating API response wrappers.","When a simple interface definition is clearer; when the mapped type logic becomes too complex to understand.","// Deep readonly utility
+type DeepReadonly<T> = {
+  readonly [K in keyof T]: T[K] extends object
+    ? T[K] extends Function
+      ? T[K]
+      : DeepReadonly<T[K]>
+    : T[K];
+};
+
+// Make specific keys optional
+type PartialBy<T, K extends keyof T> = Omit<T, K> & Partial<Pick<T, K>>;
+
+// Make specific keys required
+type RequiredBy<T, K extends keyof T> = Omit<T, K> & Required<Pick<T, K>>;
+
+// Create an update type where all fields are optional except id
+type Updatable<T extends { id: string }> = Pick<T, 'id'> & Partial<Omit<T, 'id'>>;
+
+// Prefix all keys
+type Prefixed<T, P extends string> = {
+  [K in keyof T as `${P}${Capitalize<string & K>}`]: T[K];
+};
+
+// Event map from entity
+type CrudEvents<T extends string> = {
+  [K in T as `${K}Created`]: (id: string) => void;
+} & {
+  [K in T as `${K}Updated`]: (id: string, changes: Record<string, unknown>) => void;
+} & {
+  [K in T as `${K}Deleted`]: (id: string) => void;
+};
+
+// Practical example
+interface UserModel {
+  id: string;
+  email: string;
+  name: string;
+  role: 'admin' | 'user';
+  profile: {
+    bio: string;
+    avatar: string;
+  };
+}
+
+// Derived types
+type CreateUserDTO = Omit<UserModel, 'id'>;
+type UpdateUserDTO = Updatable<UserModel>;
+type ReadonlyUser = DeepReadonly<UserModel>;
+type UserWithOptionalProfile = PartialBy<UserModel, 'profile'>;
+
+// Usage
+const createUser = (dto: CreateUserDTO): UserModel => ({
+  id: `usr_${Date.now()}`,
+  ...dto,
+});
+
+const updateUser = (dto: UpdateUserDTO): void => {
+  console.log(`Updating user ${dto.id}:`, dto);
+};
+
+const frozenUser: ReadonlyUser = createUser({
+  email: 'alice@example.com',
+  name: 'Alice',
+  role: 'admin',
+  profile: { bio: 'Engineer', avatar: 'https://example.com/avatar.png' },
+});
+
+// frozenUser.name = 'Bob';  // Error: readonly
+// frozenUser.profile.bio = 'x';  // Error: deeply readonly
+
+updateUser({ id: frozenUser.id, name: 'Alice Smith' });
+console.log(frozenUser);","Manually writing separate Create, Update, Read, and Patch interfaces for every entity, leading to massive duplication that drifts out of sync.",Medium,Negligible,typescript (built-in),https://www.typescriptlang.org/docs/handbook/2/mapped-types.html
+28,Conditional Types,TypeScript-Specific,"conditional type, infer, extends, type-level branching","Selects types based on conditions at the type level, enabling type-level programming with branching logic and type extraction.","When building type utilities that depend on input types; when extracting nested types; when creating polymorphic APIs with precise return types.","When simple union or intersection types solve the problem; when conditional types become deeply nested and unreadable.","// Extract resolved type from Promise (recursive)
+type UnwrapPromise<T> = T extends Promise<infer U> ? UnwrapPromise<U> : T;
+
+// Extract array element type
+type ElementType<T> = T extends readonly (infer E)[] ? E : never;
+
+// Extract function return type (works with async)
+type AsyncReturnType<T extends (...args: any[]) => any> = UnwrapPromise<ReturnType<T>>;
+
+// Make properties nullable based on condition
+type NullableIf<T, Condition extends boolean> = Condition extends true ? T | null : T;
+
+// Extract event payload from a handler function type
+type ExtractPayload<T> = T extends (payload: infer P) => any ? P : never;
+
+// Practical: API response type based on method
+type ApiMethod = 'getOne' | 'getMany' | 'create' | 'update' | 'delete';
+
+type ApiResult<M extends ApiMethod, T> = M extends 'getOne'
+  ? T | null
+  : M extends 'getMany'
+    ? T[]
+    : M extends 'create'
+      ? T & { createdAt: Date }
+      : M extends 'update'
+        ? T & { updatedAt: Date }
+        : M extends 'delete'
+          ? { deleted: true; id: string }
+          : never;
+
+interface User {
+  id: string;
+  name: string;
+  email: string;
+}
+
+// Type-safe API client
+class ApiClient<T extends { id: string }> {
+  constructor(private resource: string) {}
+
+  async execute<M extends ApiMethod>(method: M, id?: string): Promise<ApiResult<M, T>> {
+    console.log(`${method} ${this.resource} ${id ?? ''}`);
+    // Simulated response
+    return {} as ApiResult<M, T>;
+  }
+}
+
+// Usage demonstrates type inference
+const userApi = new ApiClient<User>('users');
+
+// Return type is User | null
+const oneUser = await userApi.execute('getOne', '123');
+
+// Return type is User[]
+const allUsers = await userApi.execute('getMany');
+
+// Return type is User & { createdAt: Date }
+const created = await userApi.execute('create');
+
+// Return type is { deleted: true; id: string }
+const deleted = await userApi.execute('delete', '123');
+
+// Type extraction examples
+type T1 = UnwrapPromise<Promise<Promise<string>>>; // string
+type T2 = ElementType<number[]>;                    // number
+type T3 = AsyncReturnType<() => Promise<User>>;     // User
+
+console.log(oneUser, allUsers, created, deleted);","Using 'any' or overly broad union types for API return values, losing all type safety and forcing consumers to manually cast results.",High,Negligible,typescript (built-in),https://www.typescriptlang.org/docs/handbook/2/conditional-types.html
+29,Result Pattern,TypeScript-Specific,"result, either, error handling, success, failure","Models success and failure as explicit return types instead of throwing exceptions, making error handling visible in the type signature.","When functions can fail in expected ways; when you want callers to handle errors explicitly; when building libraries with predictable error handling.","When exceptions are truly exceptional (programmer errors); when the Result ceremony is too verbose for simple operations.","type Result<T, E = Error> =
+  | { ok: true; value: T }
+  | { ok: false; error: E };
+
+function Ok<T>(value: T): Result<T, never> {
+  return { ok: true, value };
+}
+
+function Err<E>(error: E): Result<never, E> {
+  return { ok: false, error };
+}
+
+// Helper: map over success value
+function mapResult<T, U, E>(result: Result<T, E>, fn: (value: T) => U): Result<U, E> {
+  return result.ok ? Ok(fn(result.value)) : result;
+}
+
+// Helper: chain Results
+function flatMap<T, U, E>(result: Result<T, E>, fn: (value: T) => Result<U, E>): Result<U, E> {
+  return result.ok ? fn(result.value) : result;
+}
+
+// Helper: collect array of Results
+function collectResults<T, E>(results: Result<T, E>[]): Result<T[], E> {
+  const values: T[] = [];
+  for (const result of results) {
+    if (!result.ok) return result;
+    values.push(result.value);
+  }
+  return Ok(values);
+}
+
+// Domain errors
+type UserError =
+  | { code: 'VALIDATION'; message: string; field: string }
+  | { code: 'NOT_FOUND'; message: string }
+  | { code: 'DUPLICATE'; message: string };
+
+interface UserData {
+  id: string;
+  email: string;
+  name: string;
+}
+
+function validateEmail(email: string): Result<string, UserError> {
+  const regex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  if (!regex.test(email)) {
+    return Err({ code: 'VALIDATION', message: 'Invalid email format', field: 'email' });
+  }
+  return Ok(email.toLowerCase().trim());
+}
+
+function validateName(name: string): Result<string, UserError> {
+  const trimmed = name.trim();
+  if (trimmed.length < 2 || trimmed.length > 50) {
+    return Err({ code: 'VALIDATION', message: 'Name must be 2-50 characters', field: 'name' });
+  }
+  return Ok(trimmed);
+}
+
+function createUser(input: { email: string; name: string }): Result<UserData, UserError> {
+  const emailResult = validateEmail(input.email);
+  if (!emailResult.ok) return emailResult;
+
+  const nameResult = validateName(input.name);
+  if (!nameResult.ok) return nameResult;
+
+  return Ok({
+    id: `usr_${Date.now()}`,
+    email: emailResult.value,
+    name: nameResult.value,
+  });
+}
+
+// Usage
+const result = createUser({ email: 'alice@example.com', name: 'Alice' });
+if (result.ok) {
+  console.log(`Created user: ${result.value.id}`);
+} else {
+  switch (result.error.code) {
+    case 'VALIDATION':
+      console.error(`Validation error on ${result.error.field}: ${result.error.message}`);
+      break;
+    case 'NOT_FOUND':
+      console.error(`Not found: ${result.error.message}`);
+      break;
+    case 'DUPLICATE':
+      console.error(`Duplicate: ${result.error.message}`);
+      break;
+  }
+}
+
+const badResult = createUser({ email: 'bad', name: 'A' });
+console.log(badResult);","Throwing exceptions for expected failures (validation errors, not-found) and relying on try/catch everywhere, hiding error types from the function signature.",Medium,Negligible,"neverthrow, oxide.ts, true-myth, fp-ts",https://effect.website/
+30,Repository Pattern,TypeScript-Specific,"repository, data access, abstraction, CRUD, persistence","Abstracts data access behind a collection-like interface, decoupling business logic from persistence implementation details.","When you want to swap databases or ORMs without changing business logic; when testing services with in-memory repositories; when enforcing data access conventions.","When the app uses a single simple data source and will never change; when the repository becomes a thin wrapper adding no value over the ORM.","interface Entity {
+  id: string;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+interface FindOptions<T> {
+  where?: Partial<T>;
+  orderBy?: { field: keyof T; direction: 'asc' | 'desc' };
+  limit?: number;
+  offset?: number;
+}
+
+interface Repository<T extends Entity> {
+  findById(id: string): Promise<T | null>;
+  findMany(options?: FindOptions<T>): Promise<T[]>;
+  create(data: Omit<T, 'id' | 'createdAt' | 'updatedAt'>): Promise<T>;
+  update(id: string, data: Partial<Omit<T, 'id' | 'createdAt' | 'updatedAt'>>): Promise<T>;
+  delete(id: string): Promise<boolean>;
+  count(where?: Partial<T>): Promise<number>;
+}
+
+interface User extends Entity {
+  email: string;
+  name: string;
+  role: 'admin' | 'user';
+}
+
+// In-memory implementation (great for testing)
+class InMemoryUserRepository implements Repository<User> {
+  private store = new Map<string, User>();
+
+  async findById(id: string): Promise<User | null> {
+    return this.store.get(id) ?? null;
+  }
+
+  async findMany(options?: FindOptions<User>): Promise<User[]> {
+    let results = Array.from(this.store.values());
+    if (options?.where) {
+      results = results.filter((item) =>
+        Object.entries(options.where!).every(
+          ([key, value]) => item[key as keyof User] === value
+        )
+      );
+    }
+    if (options?.orderBy) {
+      const { field, direction } = options.orderBy;
+      results.sort((a, b) => {
+        const aVal = a[field], bVal = b[field];
+        const cmp = aVal < bVal ? -1 : aVal > bVal ? 1 : 0;
+        return direction === 'asc' ? cmp : -cmp;
+      });
+    }
+    if (options?.offset) results = results.slice(options.offset);
+    if (options?.limit) results = results.slice(0, options.limit);
+    return results;
+  }
+
+  async create(data: Omit<User, 'id' | 'createdAt' | 'updatedAt'>): Promise<User> {
+    const now = new Date();
+    const user: User = { id: `usr_${Date.now()}`, createdAt: now, updatedAt: now, ...data };
+    this.store.set(user.id, user);
+    return user;
+  }
+
+  async update(id: string, data: Partial<Omit<User, 'id' | 'createdAt' | 'updatedAt'>>): Promise<User> {
+    const existing = this.store.get(id);
+    if (!existing) throw new Error(`User ${id} not found`);
+    const updated: User = { ...existing, ...data, updatedAt: new Date() };
+    this.store.set(id, updated);
+    return updated;
+  }
+
+  async delete(id: string): Promise<boolean> {
+    return this.store.delete(id);
+  }
+
+  async count(where?: Partial<User>): Promise<number> {
+    if (!where) return this.store.size;
+    return (await this.findMany({ where })).length;
+  }
+}
+
+// Service depends on interface, not implementation
+class UserService {
+  constructor(private repo: Repository<User>) {}
+
+  async registerUser(email: string, name: string): Promise<User> {
+    const existing = await this.repo.findMany({ where: { email } });
+    if (existing.length > 0) throw new Error('Email already registered');
+    return this.repo.create({ email, name, role: 'user' });
+  }
+
+  async listAdmins(): Promise<User[]> {
+    return this.repo.findMany({ where: { role: 'admin' }, orderBy: { field: 'name', direction: 'asc' } });
+  }
+}
+
+// Usage
+const repo = new InMemoryUserRepository();
+const service = new UserService(repo);
+
+const alice = await service.registerUser('alice@example.com', 'Alice');
+console.log(`Registered: ${alice.id} - ${alice.email}`);
+
+const admins = await service.listAdmins();
+console.log(`Admins: ${admins.length}`);","Scattering raw SQL queries or ORM calls directly in service and controller code, making it impossible to test without a real database or switch persistence layers.",Medium,Negligible,"typeorm, prisma, drizzle-orm, mikro-orm",https://www.prisma.io/docs/orm/overview/introduction/what-is-prisma

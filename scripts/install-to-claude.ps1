@@ -15,6 +15,7 @@ if (-not (Test-Path $TargetDir)) {
 $CurrentDir = Split-Path -Parent $PSScriptRoot
 $SkillsSource = Join-Path $CurrentDir "skills"
 $RulesSource = Join-Path $CurrentDir "rules"
+$AgentsSource = Join-Path $CurrentDir "agents"
 
 Write-Host ">> Nguồn skills: $SkillsSource"
 Write-Host ">> Đích Claude: $TargetDir"
@@ -39,6 +40,19 @@ if (Test-Path "$RulesSource\AGENTS.md") {
 if (Test-Path "$RulesSource\SOUL.md") {
     Copy-Item -Path "$RulesSource\SOUL.md" -Destination "$ClaudeConfig\SOUL.md" -Force
     Write-Host ">> Đã cập nhật SOUL.md!" -ForegroundColor Yellow
+}
+
+# Đồng bộ agents vào ~/.claude/agents/
+if (Test-Path $AgentsSource) {
+    $targetAgents = "$ClaudeConfig\agents"
+    if (-not (Test-Path $targetAgents)) {
+        New-Item -ItemType Directory -Path $targetAgents -Force | Out-Null
+    }
+    $agents = Get-ChildItem -Path $AgentsSource -Filter "*.md"
+    foreach ($a in $agents) {
+        Copy-Item -Path $a.FullName -Destination "$targetAgents\$($a.Name)" -Force
+    }
+    Write-Host ">> Đã cập nhật $($agents.Count) agent personas sang Claude Code!" -ForegroundColor Yellow
 }
 
 Write-Host " Hoàn tất cấu hình Claude Code!" -ForegroundColor Cyan

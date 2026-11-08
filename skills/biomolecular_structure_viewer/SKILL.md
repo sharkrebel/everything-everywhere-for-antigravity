@@ -6,6 +6,8 @@ description: >
   and manages user 3D annotations and highlighted residues.
   Use when the user asks to visualise a protein or nucleic acid, display a 3D structure,
   or asks about 3D biomolecular structure annotations and highlighted residues.
+metadata:
+  publisher: google
 ---
 
 # Biomolecular Structure Viewer

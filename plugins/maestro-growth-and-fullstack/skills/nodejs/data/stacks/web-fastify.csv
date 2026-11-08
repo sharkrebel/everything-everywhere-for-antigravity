@@ -1,0 +1,788 @@
+No,Category,Guideline,Description,Do,Dont,Code Good,Code Bad,Severity,Docs URL
+1,Setup,"Initialize Fastify with TypeScript, logger, and ajv options","Create a Fastify instance with proper TypeScript generics, Pino logger enabled, and Ajv configured for request validation with removeAdditional and coerceTypes.","Use Fastify generic with typed server and enable logger with appropriate log level and Ajv options","Don't create Fastify without logger or with default Ajv settings that allow extra properties through","import Fastify from 'fastify';
+
+const app = Fastify({
+  logger: {
+    level: 'info',
+    transport: {
+      target: 'pino-pretty',
+      options: { colorize: true },
+    },
+  },
+  ajv: {
+    customOptions: {
+      removeAdditional: 'all',
+      coerceTypes: true,
+      useDefaults: true,
+    },
+  },
+});
+
+export default app;","import Fastify from 'fastify';
+
+const app = Fastify();
+
+// No logger, no ajv customization
+// Extra properties pass through validation
+// No type safety on server instance
+
+export default app;",critical,https://fastify.dev/docs/latest/Reference/Server/
+2,Setup,"Register plugins with fastify-plugin for proper encapsulation","Wrap shared plugins with fastify-plugin (fp) so decorators and hooks are exposed to the parent context instead of being encapsulated inside the plugin scope.","Wrap reusable plugins with fp() and set a unique name for debugging","Don't register shared plugins without fp() or they will be scoped and invisible to sibling routes","import fp from 'fastify-plugin';
+import { FastifyInstance } from 'fastify';
+
+async function dbPlugin(fastify: FastifyInstance) {
+  const pool = createPool(process.env.DATABASE_URL!);
+  fastify.decorate('db', pool);
+}
+
+export default fp(dbPlugin, {
+  name: 'db-plugin',
+  dependencies: [],
+});","import { FastifyInstance } from 'fastify';
+
+async function dbPlugin(fastify: FastifyInstance) {
+  const pool = createPool(process.env.DATABASE_URL!);
+  fastify.decorate('db', pool);
+}
+
+// Without fp(), db decorator is scoped
+// Sibling routes cannot access fastify.db
+export default dbPlugin;",critical,https://fastify.dev/docs/latest/Reference/Plugins/
+3,Routing,"Define typed routes with RouteGenericInterface","Use the RouteGenericInterface to define Body, Querystring, Params, Headers, and Reply types for full type safety in route handlers.","Define an interface extending RouteGenericInterface and pass it as a generic to the route method","Don't use untyped route handlers where req.body and req.params are unknown","import { FastifyInstance, RouteGenericInterface } from 'fastify';
+
+interface GetUserRoute extends RouteGenericInterface {
+  Params: { id: string };
+  Reply: { id: string; name: string; email: string };
+}
+
+export async function userRoutes(fastify: FastifyInstance) {
+  fastify.get<GetUserRoute>('/users/:id', async (req, reply) => {
+    const { id } = req.params; // typed as { id: string }
+    const user = await findUser(id);
+    return reply.send(user); // typed reply
+  });
+}","import { FastifyInstance } from 'fastify';
+
+export async function userRoutes(fastify: FastifyInstance) {
+  fastify.get('/users/:id', async (req, reply) => {
+    const { id } = req.params as any; // no type safety
+    const user = await findUser(id);
+    return reply.send(user); // untyped response
+  });
+}",high,https://fastify.dev/docs/latest/Reference/TypeScript/
+4,Routing,"Use route shorthand methods for cleaner code","Prefer shorthand methods like .get(), .post(), .put(), .delete() over the verbose .route() method for simple endpoints. Reserve .route() for complex configurations.","Use shorthand methods with inline schema and handler for concise route definitions","Don't use .route() for simple CRUD endpoints where shorthands suffice","import { FastifyInstance } from 'fastify';
+
+export async function itemRoutes(fastify: FastifyInstance) {
+  fastify.get('/items', async () => {
+    return { items: await listItems() };
+  });
+
+  fastify.post('/items', async (req, reply) => {
+    const item = await createItem(req.body);
+    return reply.code(201).send(item);
+  });
+
+  fastify.delete('/items/:id', async (req, reply) => {
+    await deleteItem((req.params as any).id);
+    return reply.code(204).send();
+  });
+}","import { FastifyInstance } from 'fastify';
+
+export async function itemRoutes(fastify: FastifyInstance) {
+  fastify.route({
+    method: 'GET',
+    url: '/items',
+    handler: async () => {
+      return { items: await listItems() };
+    },
+  });
+
+  fastify.route({
+    method: 'POST',
+    url: '/items',
+    handler: async (req, reply) => {
+      const item = await createItem(req.body);
+      return reply.code(201).send(item);
+    },
+  });
+}",low,https://fastify.dev/docs/latest/Reference/Routes/
+5,Schema Validation,"JSON Schema for request and response validation","Define JSON Schema objects for body, querystring, params, and response to enable automatic request validation and response serialization by Fastify.","Attach schema objects to route options for automatic validation with descriptive error messages","Don't validate manually inside handlers or skip validation entirely","import { FastifyInstance } from 'fastify';
+
+const createUserSchema = {
+  body: {
+    type: 'object' as const,
+    required: ['name', 'email'],
+    properties: {
+      name: { type: 'string', minLength: 1, maxLength: 100 },
+      email: { type: 'string', format: 'email' },
+      age: { type: 'integer', minimum: 0 },
+    },
+    additionalProperties: false,
+  },
+  response: {
+    201: {
+      type: 'object' as const,
+      properties: {
+        id: { type: 'string' },
+        name: { type: 'string' },
+      },
+    },
+  },
+};
+
+fastify.post('/users', { schema: createUserSchema }, async (req, reply) => {
+  const user = await createUser(req.body);
+  return reply.code(201).send(user);
+});","import { FastifyInstance } from 'fastify';
+
+fastify.post('/users', async (req, reply) => {
+  const body = req.body as any;
+  if (!body.name || !body.email) {
+    return reply.code(400).send({ error: 'Missing fields' });
+  }
+  // Manual validation is verbose and error-prone
+  const user = await createUser(body);
+  return reply.code(201).send(user);
+});",critical,https://fastify.dev/docs/latest/Reference/Validation-and-Serialization/
+6,Schema Validation,"Use @sinclair/typebox for type-safe schemas","TypeBox generates JSON Schema objects that also produce TypeScript types, giving compile-time safety and runtime validation from a single schema definition.","Define schemas with Type.Object() and extract static types with Static<typeof schema>","Don't maintain separate TypeScript interfaces and JSON Schema objects that can drift out of sync","import { Type, Static } from '@sinclair/typebox';
+
+const CreateUserSchema = Type.Object({
+  name: Type.String({ minLength: 1, maxLength: 100 }),
+  email: Type.String({ format: 'email' }),
+  role: Type.Union([Type.Literal('admin'), Type.Literal('user')]),
+});
+
+type CreateUserBody = Static<typeof CreateUserSchema>;
+
+fastify.post<{ Body: CreateUserBody }>('/users', {
+  schema: { body: CreateUserSchema },
+}, async (req, reply) => {
+  const { name, email, role } = req.body; // fully typed
+  return reply.code(201).send({ name, email, role });
+});","// Separate interface and schema that can drift
+interface CreateUserBody {
+  name: string;
+  email: string;
+  role: 'admin' | 'user';
+}
+
+const schema = {
+  body: {
+    type: 'object',
+    properties: {
+      name: { type: 'string' },
+      email: { type: 'string' },
+      // forgot to add 'role' to schema!
+    },
+  },
+};",high,https://fastify.dev/docs/latest/Reference/Type-Providers/
+7,Hooks,"Use onRequest and preHandler lifecycle hooks","onRequest runs before parsing and is ideal for authentication checks. preHandler runs after validation and is suitable for authorization and data enrichment logic.","Use onRequest for auth token verification and preHandler for role-based access control","Don't put auth logic directly in route handlers or use the wrong hook for the task","import { FastifyInstance } from 'fastify';
+
+export async function protectedRoutes(fastify: FastifyInstance) {
+  fastify.addHook('onRequest', async (req, reply) => {
+    const token = req.headers.authorization?.replace('Bearer ', '');
+    if (!token) {
+      return reply.code(401).send({ error: 'Unauthorized' });
+    }
+    req.user = await verifyToken(token);
+  });
+
+  fastify.addHook('preHandler', async (req, reply) => {
+    if (req.user.role !== 'admin') {
+      return reply.code(403).send({ error: 'Forbidden' });
+    }
+  });
+
+  fastify.get('/admin/stats', async (req) => {
+    return { stats: await getAdminStats() };
+  });
+}","import { FastifyInstance } from 'fastify';
+
+export async function protectedRoutes(fastify: FastifyInstance) {
+  fastify.get('/admin/stats', async (req, reply) => {
+    // Auth logic mixed into handler
+    const token = req.headers.authorization?.replace('Bearer ', '');
+    if (!token) return reply.code(401).send({ error: 'No token' });
+    const user = await verifyToken(token);
+    if (user.role !== 'admin') return reply.code(403).send({ error: 'Forbidden' });
+    return { stats: await getAdminStats() };
+  });
+}",high,https://fastify.dev/docs/latest/Reference/Hooks/
+8,Hooks,"Use onSend and onError hooks for response transformation","onSend allows modifying the serialized payload before sending. onError provides centralized error logging and transformation without replacing the error handler.","Use onSend to add response headers or transform payloads and onError for structured error logging","Don't modify responses inside individual route handlers when the transformation applies globally","import { FastifyInstance } from 'fastify';
+
+export async function responseHooks(fastify: FastifyInstance) {
+  fastify.addHook('onSend', async (req, reply, payload) => {
+    reply.header('X-Request-Id', req.id);
+    reply.header('X-Response-Time', reply.elapsedTime.toFixed(2));
+    return payload;
+  });
+
+  fastify.addHook('onError', async (req, reply, error) => {
+    req.log.error({
+      err: error,
+      requestId: req.id,
+      url: req.url,
+      method: req.method,
+    }, 'Request error occurred');
+  });
+}","import { FastifyInstance } from 'fastify';
+
+// Adding headers in every single handler
+fastify.get('/items', async (req, reply) => {
+  reply.header('X-Request-Id', req.id);
+  const items = await listItems();
+  return items;
+});
+
+fastify.get('/users', async (req, reply) => {
+  reply.header('X-Request-Id', req.id);
+  const users = await listUsers();
+  return users;
+});",medium,https://fastify.dev/docs/latest/Reference/Hooks/#onsend
+9,Decorators,"Extend Fastify instance with custom decorators","Use fastify.decorate() to attach shared services like database connections, caches, or utility functions to the Fastify instance for access across all routes.","Use decorate() with proper TypeScript module augmentation so the decorator is typed","Don't attach properties directly to the fastify object or use global variables for shared services","import fp from 'fastify-plugin';
+import { FastifyInstance } from 'fastify';
+import { PrismaClient } from '@prisma/client';
+
+declare module 'fastify' {
+  interface FastifyInstance {
+    prisma: PrismaClient;
+  }
+}
+
+export default fp(async (fastify: FastifyInstance) => {
+  const prisma = new PrismaClient();
+  await prisma.$connect();
+  fastify.decorate('prisma', prisma);
+  fastify.addHook('onClose', async () => prisma.$disconnect());
+});","import { PrismaClient } from '@prisma/client';
+
+// Global variable, no lifecycle management
+const prisma = new PrismaClient();
+
+export { prisma };
+
+// In routes: import { prisma } from '../db';
+// No connection management, no graceful shutdown",high,https://fastify.dev/docs/latest/Reference/Decorators/
+10,Decorators,"Use request and reply decorators for shared utilities","decorateRequest() and decorateReply() add properties or methods to every request or reply object, useful for parsed user data, request timing, or response helpers.","Use decorateRequest with null initial value and populate in hooks for per-request data","Don't store per-request state on the Fastify instance or use global mutable variables","import fp from 'fastify-plugin';
+import { FastifyInstance } from 'fastify';
+
+declare module 'fastify' {
+  interface FastifyRequest {
+    startTime: number;
+    user: { id: string; role: string } | null;
+  }
+}
+
+export default fp(async (fastify: FastifyInstance) => {
+  fastify.decorateRequest('startTime', 0);
+  fastify.decorateRequest('user', null);
+
+  fastify.addHook('onRequest', async (req) => {
+    req.startTime = performance.now();
+  });
+});","import { FastifyInstance } from 'fastify';
+
+// Storing request-scoped data on the instance (shared!)
+let currentUser: any = null;
+
+fastify.addHook('onRequest', async (req) => {
+  currentUser = await getUser(req.headers.authorization);
+});
+
+fastify.get('/me', async () => {
+  // Race condition: currentUser is shared across requests
+  return { user: currentUser };
+});",critical,https://fastify.dev/docs/latest/Reference/Decorators/#decoraterequest
+11,Serialization,"Use response schemas for fast JSON serialization","Fastify uses fast-json-stringify when a response schema is defined, which is 2-5x faster than JSON.stringify(). Always define response schemas for performance-critical routes.","Define response schemas with all expected properties so fast-json-stringify can optimize serialization","Don't omit response schemas on high-throughput endpoints or return unschematized objects","import { FastifyInstance } from 'fastify';
+
+fastify.get('/products', {
+  schema: {
+    response: {
+      200: {
+        type: 'object',
+        properties: {
+          products: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: {
+                id: { type: 'string' },
+                name: { type: 'string' },
+                price: { type: 'number' },
+              },
+            },
+          },
+          total: { type: 'integer' },
+        },
+      },
+    },
+  },
+}, async () => {
+  const products = await listProducts();
+  return { products, total: products.length };
+});","import { FastifyInstance } from 'fastify';
+
+// No response schema: falls back to slow JSON.stringify
+// Also leaks internal fields to the client
+fastify.get('/products', async () => {
+  const products = await listProducts();
+  return { products, total: products.length };
+});",medium,https://fastify.dev/docs/latest/Reference/Validation-and-Serialization/#serialization
+12,Error Handling,"Set a centralized error handler with setErrorHandler","Use setErrorHandler to catch all errors, format consistent error responses, log errors, and map known error types to appropriate HTTP status codes.","Use setErrorHandler with typed error responses and proper status code mapping for all error types","Don't let Fastify's default error handler expose raw error messages or stack traces to clients","import { FastifyInstance, FastifyError } from 'fastify';
+
+fastify.setErrorHandler((error: FastifyError, req, reply) => {
+  req.log.error({ err: error }, 'Request failed');
+
+  if (error.validation) {
+    return reply.code(400).send({
+      error: 'Validation Error',
+      message: error.message,
+      details: error.validation,
+    });
+  }
+
+  const statusCode = error.statusCode ?? 500;
+  return reply.code(statusCode).send({
+    error: statusCode >= 500 ? 'Internal Server Error' : error.message,
+    statusCode,
+  });
+});","import { FastifyInstance } from 'fastify';
+
+// No custom error handler, default behavior:
+// - Stack traces exposed in development
+// - Inconsistent error response format
+// - No structured logging of errors
+
+fastify.get('/fail', async () => {
+  throw new Error('Something broke');
+  // Client sees raw error with stack trace
+});",critical,https://fastify.dev/docs/latest/Reference/Server/#seterrorhandler
+13,Error Handling,"Create custom error classes with statusCode property","Define custom error classes that include a statusCode property so Fastify automatically uses the correct HTTP status code in the error response.","Create error classes extending Error with statusCode and use them in route handlers","Don't throw plain Error objects or use reply.code() manually for every error case in handlers","export class AppError extends Error {
+  statusCode: number;
+  constructor(message: string, statusCode: number) {
+    super(message);
+    this.statusCode = statusCode;
+    this.name = 'AppError';
+  }
+}
+
+export class NotFoundError extends AppError {
+  constructor(resource: string) {
+    super(`${resource} not found`, 404);
+    this.name = 'NotFoundError';
+  }
+}
+
+export class UnauthorizedError extends AppError {
+  constructor(message = 'Unauthorized') {
+    super(message, 401);
+    this.name = 'UnauthorizedError';
+  }
+}
+
+// Usage in route:
+fastify.get('/users/:id', async (req) => {
+  const user = await findUser(req.params.id);
+  if (!user) throw new NotFoundError('User');
+  return user;
+});","fastify.get('/users/:id', async (req, reply) => {
+  const user = await findUser(req.params.id);
+  if (!user) {
+    return reply.code(404).send({ error: 'User not found' });
+  }
+  // Inconsistent: some routes throw, some reply manually
+  // No reusable error types, duplicated status code logic
+  return user;
+});",high,https://fastify.dev/docs/latest/Reference/Errors/
+14,Authentication,"Use @fastify/jwt plugin for JWT authentication","Register @fastify/jwt to add jwt.sign() and jwt.verify() methods to the Fastify instance and request.jwtVerify() for route-level token verification.","Register @fastify/jwt with a secret and use request.jwtVerify() in auth hooks","Don't implement JWT parsing manually or store secrets in code instead of environment variables","import fastifyJwt from '@fastify/jwt';
+import { FastifyInstance } from 'fastify';
+
+export async function authPlugin(fastify: FastifyInstance) {
+  fastify.register(fastifyJwt, {
+    secret: process.env.JWT_SECRET!,
+    sign: { expiresIn: '1h' },
+  });
+
+  fastify.post('/login', async (req) => {
+    const { email, password } = req.body as any;
+    const user = await authenticateUser(email, password);
+    const token = fastify.jwt.sign({ id: user.id, role: user.role });
+    return { token };
+  });
+
+  fastify.get('/me', {
+    preHandler: [async (req) => req.jwtVerify()],
+  }, async (req) => {
+    return { user: req.user };
+  });
+}","import jwt from 'jsonwebtoken';
+
+const SECRET = 'hardcoded-secret-in-code';
+
+fastify.post('/login', async (req) => {
+  const { email, password } = req.body as any;
+  const user = await authenticateUser(email, password);
+  const token = jwt.sign({ id: user.id }, SECRET);
+  return { token };
+});
+
+fastify.get('/me', async (req) => {
+  const token = req.headers.authorization?.split(' ')[1];
+  const decoded = jwt.verify(token!, SECRET);
+  return { user: decoded };
+});",critical,https://fastify.dev/docs/latest/Guides/Getting-Started/#loading-order-of-your-plugins
+15,Authentication,"Use preHandler hook for route-level authentication guards","Create reusable authentication middleware as a preHandler hook function that can be applied selectively to routes or route groups that require authentication.","Create a reusable authenticate function and apply it via preHandler on protected routes","Don't duplicate auth verification logic in each route handler or apply auth globally when some routes should be public","import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
+
+async function authenticate(req: FastifyRequest, reply: FastifyReply) {
+  try {
+    await req.jwtVerify();
+  } catch (err) {
+    reply.code(401).send({ error: 'Invalid or expired token' });
+  }
+}
+
+async function requireRole(role: string) {
+  return async (req: FastifyRequest, reply: FastifyReply) => {
+    const user = req.user as { role: string };
+    if (user.role !== role) {
+      reply.code(403).send({ error: 'Insufficient permissions' });
+    }
+  };
+}
+
+export async function adminRoutes(fastify: FastifyInstance) {
+  fastify.get('/admin/dashboard', {
+    preHandler: [authenticate, await requireRole('admin')],
+  }, async (req) => {
+    return { dashboard: await getDashboard() };
+  });
+}","import { FastifyInstance } from 'fastify';
+
+// Auth applied globally - breaks public endpoints
+fastify.addHook('preHandler', async (req, reply) => {
+  await req.jwtVerify();
+});
+
+// This public route now incorrectly requires auth
+fastify.get('/health', async () => {
+  return { status: 'ok' };
+});",high,https://fastify.dev/docs/latest/Reference/Hooks/#prehandler
+16,CORS,"Configure @fastify/cors plugin properly","Register @fastify/cors with explicit origin, methods, and credentials settings instead of using permissive defaults that allow any origin.","Specify exact allowed origins, methods, and headers in the CORS configuration","Don't use origin: true or origin: '*' in production as it allows any domain to make requests","import cors from '@fastify/cors';
+import { FastifyInstance } from 'fastify';
+
+export async function setupCors(fastify: FastifyInstance) {
+  await fastify.register(cors, {
+    origin: [
+      'https://app.example.com',
+      'https://admin.example.com',
+    ],
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH'],
+    credentials: true,
+    allowedHeaders: ['Content-Type', 'Authorization'],
+    maxAge: 86400,
+  });
+}","import cors from '@fastify/cors';
+import { FastifyInstance } from 'fastify';
+
+export async function setupCors(fastify: FastifyInstance) {
+  await fastify.register(cors, {
+    origin: true, // allows ALL origins
+    // No methods restriction
+    // No credentials handling
+    // No maxAge caching
+  });
+}",critical,https://fastify.dev/docs/latest/Guides/Getting-Started/#loading-order-of-your-plugins
+17,Database,"Integrate Prisma via a Fastify decorator plugin","Register Prisma as a decorated property on the Fastify instance with proper connection lifecycle management including graceful disconnect on server close.","Create a Prisma plugin with fp() that decorates the instance and handles onClose cleanup","Don't import PrismaClient directly in route files or create multiple client instances","import fp from 'fastify-plugin';
+import { FastifyInstance } from 'fastify';
+import { PrismaClient } from '@prisma/client';
+
+declare module 'fastify' {
+  interface FastifyInstance {
+    prisma: PrismaClient;
+  }
+}
+
+export default fp(async (fastify: FastifyInstance) => {
+  const prisma = new PrismaClient({
+    log: ['query', 'warn', 'error'],
+  });
+  await prisma.$connect();
+  fastify.decorate('prisma', prisma);
+  fastify.addHook('onClose', async () => {
+    await prisma.$disconnect();
+  });
+});
+
+// In route: fastify.prisma.user.findMany()","import { PrismaClient } from '@prisma/client';
+
+// New client per request - connection leak
+fastify.get('/users', async () => {
+  const prisma = new PrismaClient();
+  const users = await prisma.user.findMany();
+  // Forgot to disconnect - connection pool exhaustion
+  return users;
+});",critical,https://fastify.dev/docs/latest/Reference/Decorators/
+18,Testing,"Use inject() method for integration testing","Fastify's inject() method sends fake HTTP requests without starting a real server, enabling fast and reliable integration tests that exercise the full request lifecycle.","Use app.inject() with method, url, payload, and headers to test routes without network overhead","Don't start a real server with listen() in tests or use external HTTP clients for integration tests","import { test, expect } from 'vitest';
+import { buildApp } from '../src/app';
+
+test('POST /users creates a user', async () => {
+  const app = await buildApp();
+
+  const response = await app.inject({
+    method: 'POST',
+    url: '/users',
+    payload: { name: 'Alice', email: 'alice@example.com' },
+    headers: { 'content-type': 'application/json' },
+  });
+
+  expect(response.statusCode).toBe(201);
+  expect(response.json()).toMatchObject({
+    name: 'Alice',
+    email: 'alice@example.com',
+  });
+
+  await app.close();
+});","import { test, expect } from 'vitest';
+import { buildApp } from '../src/app';
+
+test('POST /users creates a user', async () => {
+  const app = await buildApp();
+  await app.listen({ port: 0 }); // Starts real server - slow and flaky
+  const addr = app.server.address();
+
+  const res = await fetch(`http://localhost:${addr.port}/users`, {
+    method: 'POST',
+    body: JSON.stringify({ name: 'Alice' }),
+  });
+
+  expect(res.status).toBe(201);
+  await app.close();
+});",high,https://fastify.dev/docs/latest/Guides/Testing/
+19,Testing,"Separate app builder for testable configuration","Export a buildApp factory function that creates and configures the Fastify instance so tests can create isolated instances with different configurations.","Export a buildApp() function that returns a configured Fastify instance for both production and testing","Don't export a singleton app instance that carries state between tests","import Fastify, { FastifyInstance } from 'fastify';
+import dbPlugin from './plugins/db';
+import authPlugin from './plugins/auth';
+import userRoutes from './routes/users';
+
+export async function buildApp(opts = {}): Promise<FastifyInstance> {
+  const app = Fastify({
+    logger: opts.logger ?? false,
+    ...opts,
+  });
+
+  await app.register(dbPlugin);
+  await app.register(authPlugin);
+  await app.register(userRoutes, { prefix: '/api' });
+  await app.ready();
+
+  return app;
+}","import Fastify from 'fastify';
+
+// Singleton - shared state between tests
+const app = Fastify({ logger: true });
+
+app.register(require('./plugins/db'));
+app.register(require('./routes/users'));
+
+export default app;
+
+// Tests import the same instance
+// State leaks between test runs
+// Cannot customize config per test",high,https://fastify.dev/docs/latest/Guides/Testing/#separating-concerns-makes-testing-easy
+20,Logging,"Configure built-in Pino logger with appropriate settings","Fastify uses Pino for high-performance structured logging. Configure log level per environment, use serializers for sensitive data, and add request context automatically.","Configure Pino with environment-based log level, custom serializers, and redaction paths","Don't use console.log for application logging or disable the logger in production","import Fastify from 'fastify';
+
+const app = Fastify({
+  logger: {
+    level: process.env.LOG_LEVEL ?? 'info',
+    serializers: {
+      req(request) {
+        return {
+          method: request.method,
+          url: request.url,
+          hostname: request.hostname,
+        };
+      },
+    },
+    redact: ['req.headers.authorization', 'req.headers.cookie'],
+    transport: process.env.NODE_ENV !== 'production'
+      ? { target: 'pino-pretty', options: { colorize: true } }
+      : undefined,
+  },
+});
+
+// Usage in routes: req.log.info({ userId }, 'User fetched');","import Fastify from 'fastify';
+
+const app = Fastify({ logger: false });
+
+// Using console.log - unstructured, no levels, no context
+app.get('/users/:id', async (req) => {
+  console.log('Fetching user:', req.params);
+  const user = await findUser(req.params.id);
+  console.log('Found user:', user);
+  return user;
+});",medium,https://fastify.dev/docs/latest/Reference/Logging/
+21,TypeScript,"Extend FastifyInstance interface with module augmentation","Use TypeScript module augmentation to add type definitions for custom decorators, ensuring type safety when accessing decorated properties throughout the application.","Declare module 'fastify' augmentations in a dedicated types file and import it early","Don't use type assertions (as any) to access custom decorators or skip type definitions","// types/fastify.d.ts
+import { FastifyInstance } from 'fastify';
+import { PrismaClient } from '@prisma/client';
+import { Redis } from 'ioredis';
+
+declare module 'fastify' {
+  interface FastifyInstance {
+    prisma: PrismaClient;
+    redis: Redis;
+    config: { jwtSecret: string; apiKey: string };
+  }
+  interface FastifyRequest {
+    user: { id: string; role: string } | null;
+  }
+}
+
+// Now in routes: fastify.prisma is fully typed
+// req.user is typed across all handlers","// No type augmentation - using assertions everywhere
+fastify.get('/users', async (req, reply) => {
+  const prisma = (fastify as any).prisma;
+  const user = (req as any).user;
+  // No autocomplete, no compile-time errors
+  // Typos like (fastify as any).prism silently return undefined
+  const users = await prisma.user.findMany();
+  return users;
+});",high,https://fastify.dev/docs/latest/Reference/TypeScript/#creating-a-typescript-fastify-plugin
+22,TypeScript,"Use Type Providers for end-to-end type safety","Configure a Type Provider (TypeBox or Zod) at the Fastify instance level so route schemas automatically infer request and response types without manual generics.","Register a type provider and use withTypeProvider() for automatic schema-to-type inference","Don't manually duplicate types as both TypeScript interfaces and JSON Schema when a type provider can unify them","import Fastify from 'fastify';
+import { TypeBoxTypeProvider } from '@fastify/type-provider-typebox';
+import { Type } from '@sinclair/typebox';
+
+const app = Fastify().withTypeProvider<TypeBoxTypeProvider>();
+
+app.post('/users', {
+  schema: {
+    body: Type.Object({
+      name: Type.String(),
+      email: Type.String({ format: 'email' }),
+    }),
+    response: {
+      201: Type.Object({
+        id: Type.String(),
+        name: Type.String(),
+      }),
+    },
+  },
+}, async (req, reply) => {
+  // req.body is typed as { name: string; email: string }
+  const user = await createUser(req.body);
+  return reply.code(201).send(user);
+});","import Fastify from 'fastify';
+
+const app = Fastify();
+
+interface CreateUserBody { name: string; email: string; }
+const bodySchema = {
+  type: 'object',
+  properties: { name: { type: 'string' }, email: { type: 'string' } },
+};
+
+// Types and schemas manually kept in sync - error-prone
+app.post<{ Body: CreateUserBody }>('/users', {
+  schema: { body: bodySchema },
+}, async (req) => {
+  return await createUser(req.body);
+});",medium,https://fastify.dev/docs/latest/Reference/Type-Providers/
+23,Performance,"Configure connection pooling and keep-alive settings","Tune Fastify's HTTP server keep-alive, connection timeout, and request timeout settings for production workloads to optimize throughput and resource usage.","Set keepAliveTimeout, connectionTimeout, and requestTimeout based on your deployment environment","Don't use default timeout values in production or set excessively long timeouts that waste resources","import Fastify from 'fastify';
+
+const app = Fastify({
+  logger: true,
+  connectionTimeout: 10000,
+  keepAliveTimeout: 72000,
+  requestTimeout: 30000,
+  bodyLimit: 1048576, // 1MB
+  maxParamLength: 200,
+});
+
+app.server.maxHeadersCount = 50;
+app.server.headersTimeout = 60000;
+
+app.listen({ port: 3000, host: '0.0.0.0' }, (err) => {
+  if (err) {
+    app.log.error(err);
+    process.exit(1);
+  }
+});","import Fastify from 'fastify';
+
+const app = Fastify({ logger: true });
+
+// Default timeouts:
+// keepAliveTimeout: 72000 (ok but unintentional)
+// connectionTimeout: 0 (no limit - dangerous)
+// No bodyLimit - vulnerable to large payload attacks
+// No host binding - only listens on localhost
+
+app.listen({ port: 3000 });",medium,https://fastify.dev/docs/latest/Reference/Server/#connectiontimeout
+24,Plugins,"Use @fastify/autoload for automatic plugin registration","@fastify/autoload scans directories and registers all plugins automatically with path-based route prefixing, eliminating manual plugin registration boilerplate.","Use autoload with dir path to automatically register plugins and routes from directories","Don't manually import and register every plugin and route file as the application grows","import Fastify from 'fastify';
+import autoload from '@fastify/autoload';
+import { join } from 'node:path';
+
+const app = Fastify({ logger: true });
+
+// Auto-register all plugins in ./plugins
+app.register(autoload, {
+  dir: join(__dirname, 'plugins'),
+  encapsulate: false,
+});
+
+// Auto-register all routes in ./routes with path prefixes
+app.register(autoload, {
+  dir: join(__dirname, 'routes'),
+  options: { prefix: '/api' },
+  routeParams: true,
+});
+
+export default app;","import Fastify from 'fastify';
+import dbPlugin from './plugins/db';
+import authPlugin from './plugins/auth';
+import cachePlugin from './plugins/cache';
+import userRoutes from './routes/users';
+import postRoutes from './routes/posts';
+import commentRoutes from './routes/comments';
+// ... 20 more imports
+
+const app = Fastify({ logger: true });
+app.register(dbPlugin);
+app.register(authPlugin);
+app.register(cachePlugin);
+app.register(userRoutes, { prefix: '/api/users' });
+app.register(postRoutes, { prefix: '/api/posts' });
+app.register(commentRoutes, { prefix: '/api/comments' });
+// ... 20 more registrations",medium,https://fastify.dev/docs/latest/Guides/Getting-Started/#loading-order-of-your-plugins
+25,Deployment,"Implement graceful shutdown with close listeners","Handle SIGINT and SIGTERM signals to gracefully close the Fastify server, allowing in-flight requests to complete and cleaning up database connections before exiting.","Listen for process signals and call app.close() which triggers onClose hooks for all registered plugins","Don't call process.exit() immediately or ignore shutdown signals which can corrupt in-flight requests","import Fastify from 'fastify';
+
+const app = Fastify({ logger: true });
+
+const closeGracefully = async (signal: string) => {
+  app.log.info({ signal }, 'Received signal, shutting down');
+  await app.close();
+  process.exit(0);
+};
+
+process.on('SIGINT', closeGracefully);
+process.on('SIGTERM', closeGracefully);
+
+app.addHook('onClose', async (instance) => {
+  instance.log.info('Cleaning up resources');
+  // All decorated plugins with onClose hooks run here
+  // e.g., prisma.$disconnect(), redis.quit()
+});
+
+app.listen({ port: 3000, host: '0.0.0.0' }, (err) => {
+  if (err) {
+    app.log.error(err);
+    process.exit(1);
+  }
+});","import Fastify from 'fastify';
+
+const app = Fastify({ logger: true });
+
+app.listen({ port: 3000 });
+
+// No signal handling at all:
+// - SIGTERM kills the process immediately
+// - In-flight requests are dropped
+// - Database connections are not closed
+// - File handles may leak",critical,https://fastify.dev/docs/latest/Reference/Server/#close

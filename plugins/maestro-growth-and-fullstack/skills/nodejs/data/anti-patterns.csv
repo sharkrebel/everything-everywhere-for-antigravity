@@ -1,0 +1,348 @@
+No,Anti-Pattern,Category,Keywords,What People Do Wrong,Why Its Bad,Better Approach,Code Bad,Code Good,Severity,Detection
+1,Callback Hell,Async,"callbacks;nesting;pyramid of doom;async flow",Developers nest multiple asynchronous callbacks inside each other creating deeply indented code that is hard to read and maintain,"Deeply nested callbacks make code extremely difficult to follow and debug. Error handling becomes inconsistent because each level needs its own error check. Refactoring or adding new steps is error-prone and leads to bugs.","Use async/await or Promises to flatten asynchronous control flow. Break complex operations into named async functions. Use Promise.all for parallel operations.","fs.readFile('a.txt', (err, a) => {
+  if (err) throw err;
+  fs.readFile('b.txt', (err, b) => {
+    if (err) throw err;
+    fs.writeFile('c.txt', a + b, (err) => {
+      if (err) throw err;
+      console.log('done');
+    });
+  });
+});","async function mergeFiles(): Promise<void> {
+  const a = await fs.promises.readFile('a.txt', 'utf-8');
+  const b = await fs.promises.readFile('b.txt', 'utf-8');
+  await fs.promises.writeFile('c.txt', a + b);
+  console.log('done');
+}",high,ESLint rule max-nested-callbacks
+2,Unhandled Promise Rejection,Async,"promise;rejection;unhandled;catch;async error",Developers call async functions or chain Promises without attaching a .catch() handler or wrapping in try/catch,"Starting in Node.js 15+ unhandled promise rejections crash the process by default. Even in older versions they cause silent failures and data loss. Missing error handling makes debugging nearly impossible in production.","Always wrap await calls in try/catch blocks. Always chain .catch() on Promises. Add a global process.on('unhandledRejection') handler as a safety net.","async function loadUser(id: string) {
+  const resp = await fetch('/api/users/' + id);
+  const user = await resp.json();
+  return user;
+}
+loadUser('123');","async function loadUser(id: string) {
+  try {
+    const resp = await fetch('/api/users/' + id);
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    return await resp.json();
+  } catch (err) {
+    logger.error('Failed to load user', { id, err });
+    throw err;
+  }
+}",critical,ESLint rule no-floating-promises and node --unhandled-rejections=strict
+3,Blocking the Event Loop,Runtime,"event loop;sync;blocking;cpu;latency",Developers perform CPU-intensive computations or synchronous I/O operations directly in request handlers or event callbacks,"Node.js is single-threaded so blocking the event loop prevents all other requests from being processed. This causes latency spikes and timeouts for every connected client. Under load it can crash the service entirely.","Offload CPU-intensive work to worker threads or a job queue. Use async I/O exclusively in hot paths. Use setImmediate or process.nextTick to break up long computations.","import { pbkdf2Sync } from 'crypto';
+
+app.post('/login', (req, res) => {
+  const hash = pbkdf2Sync(req.body.password, salt, 100000, 64, 'sha512');
+  const valid = hash.equals(storedHash);
+  res.json({ valid });
+});","import { pbkdf2 } from 'crypto';
+import { promisify } from 'util';
+const pbkdf2Async = promisify(pbkdf2);
+
+app.post('/login', async (req, res) => {
+  const hash = await pbkdf2Async(req.body.password, salt, 100000, 64, 'sha512');
+  res.json({ valid: hash.equals(storedHash) });
+});",critical,clinic.js and blocked-at npm package
+4,Memory Leaks from Global Variables,Memory,"memory leak;global;module scope;heap;accumulation",Developers store request data or cache entries in module-level variables without any eviction strategy or size limit,"Module-level arrays and objects persist for the entire lifetime of the process. They grow unbounded with each request until the process runs out of memory and crashes. This is especially dangerous in long-running server processes.","Use bounded caches like lru-cache with a maxSize. Store shared state in Redis or another external store. Avoid accumulating data in module scope.","const requestLog: any[] = [];
+
+app.use((req, res, next) => {
+  requestLog.push({ url: req.url, time: Date.now(), headers: req.headers });
+  next();
+});","import { LRUCache } from 'lru-cache';
+const requestLog = new LRUCache<string, any>({ max: 1000 });
+
+app.use((req, res, next) => {
+  requestLog.set(req.id, { url: req.url, time: Date.now() });
+  next();
+});",critical,Node.js --inspect with Chrome DevTools heap snapshots
+5,Using any Type Everywhere,TypeScript,"any;type safety;typescript;typing;loose types",Developers use the any type to bypass TypeScript errors instead of defining proper types or interfaces,"Using any disables all type checking for that value and anything derived from it. Bugs that TypeScript would normally catch at compile time slip through to runtime. It defeats the entire purpose of using TypeScript.","Define interfaces and types for all data structures. Use unknown instead of any when the type is genuinely not known and narrow with type guards. Enable the noImplicitAny compiler flag.","function processPayment(order: any): any {
+  const total = order.items.reduce((s: any, i: any) => s + i.price, 0);
+  return { status: 'ok', total };
+}","interface OrderItem { name: string; price: number; }
+interface Order { items: OrderItem[]; customerId: string; }
+interface PaymentResult { status: 'ok' | 'failed'; total: number; }
+
+function processPayment(order: Order): PaymentResult {
+  const total = order.items.reduce((s, i) => s + i.price, 0);
+  return { status: 'ok', total };
+}",high,"ESLint rule @typescript-eslint/no-explicit-any and tsconfig strict mode"
+6,Circular Dependencies,Modules,"circular;dependency;import;require;module cycle",Two or more modules import each other directly or indirectly creating a cycle that leads to incomplete module initialization,"Circular imports cause one of the modules to receive an incomplete or empty export object. This leads to mysterious undefined errors at runtime that are very hard to debug. The behavior differs between CommonJS and ESM making it even more confusing.","Restructure code to break cycles by extracting shared logic into a separate module. Use dependency injection. Apply the dependency inversion principle so both modules depend on an abstraction.","// user.ts
+import { getOrders } from './order';
+export function getUser(id: string) { return { orders: getOrders(id) }; }
+
+// order.ts
+import { getUser } from './user';
+export function getOrders(userId: string) { return getUser(userId).orders; }","// user-repository.ts
+export function getUser(id: string) { return { id, name: 'Alice' }; }
+
+// order-repository.ts
+export function getOrders(userId: string) { return [{ userId, item: 'Book' }]; }
+
+// user-service.ts
+import { getUser } from './user-repository';
+import { getOrders } from './order-repository';
+export function getUserWithOrders(id: string) { return { ...getUser(id), orders: getOrders(id) }; }",high,madge npm package and ESLint plugin import/no-cycle
+7,SQL/NoSQL Injection,Security,"injection;sql;nosql;sanitize;query;user input",Developers concatenate user-supplied strings directly into database queries without using parameterized queries or input validation,"Attackers can inject malicious SQL or NoSQL operators to read or modify any data in the database. This can lead to full database compromise including data theft and deletion. It is consistently in the OWASP Top 10 vulnerabilities.","Always use parameterized queries or prepared statements. Use an ORM or query builder that escapes inputs automatically. Validate and sanitize all user input before processing.","app.get('/users', async (req, res) => {
+  const name = req.query.name;
+  const result = await db.query('SELECT * FROM users WHERE name = ''' + name + '''');
+  res.json(result.rows);
+});","app.get('/users', async (req, res) => {
+  const name = req.query.name;
+  const result = await db.query('SELECT id, name, email FROM users WHERE name = $1', [name]);
+  res.json(result.rows);
+});",critical,ESLint plugin security and SAST tools like Snyk Code
+8,Not Validating Environment Variables,Config,"env;environment;config;validation;process.env",Developers read process.env values directly without checking if they exist or have valid formats and use them throughout the application,"Missing or malformed environment variables cause cryptic runtime errors far from where the variable is used. The application may start successfully but fail unpredictably later. Different environments may silently use wrong defaults.","Validate all required environment variables at startup using a schema validation library like envalid or zod. Fail fast with a clear error message if any required variable is missing or invalid.","const dbHost = process.env.DB_HOST;
+const dbPort = process.env.DB_PORT;
+const apiKey = process.env.API_KEY;
+
+const pool = new Pool({ host: dbHost, port: Number(dbPort) });","import { cleanEnv, str, port } from 'envalid';
+
+const env = cleanEnv(process.env, {
+  DB_HOST: str({ desc: 'Database hostname' }),
+  DB_PORT: port({ default: 5432 }),
+  API_KEY: str({ desc: 'External API key' }),
+});
+const pool = new Pool({ host: env.DB_HOST, port: env.DB_PORT });",high,envalid or zod validation at application startup
+9,Swallowing Errors Silently,Error Handling,"catch;silent;swallow;error;empty catch",Developers write empty catch blocks or catch errors and do nothing with them to suppress error messages and warnings,"Silent catches hide bugs and make debugging impossible because failures leave no trace. Data corruption can occur because the code continues executing as if nothing went wrong. Issues only surface much later as mysterious side effects.","Always log the error or re-throw it. If an error is genuinely expected and safe to ignore add a comment explaining why. Use a structured logger to record error context for later debugging.","async function syncData(): Promise<void> {
+  try {
+    await fetchAndStore();
+  } catch (e) {
+    // ignore
+  }
+}","async function syncData(): Promise<void> {
+  try {
+    await fetchAndStore();
+  } catch (err) {
+    logger.error('Data sync failed', { error: err, timestamp: Date.now() });
+    metrics.increment('sync.failures');
+    throw err;
+  }
+}",high,ESLint rule no-empty and code review
+10,God Modules/Files,Architecture,"god module;large file;monolith;single responsibility;spaghetti",Developers keep adding functions and classes to a single file until it grows to thousands of lines covering many unrelated responsibilities,"Massive files are extremely hard to navigate and understand. Multiple developers editing the same file causes frequent merge conflicts. Testing becomes difficult because everything is tightly coupled. Changes in one area unexpectedly break another.","Follow the Single Responsibility Principle. Split files by domain or feature. Keep each module under 200-300 lines. Extract utility functions and types into separate files.","// api.ts - 2000 lines covering auth + users + orders + email + validation
+export function loginUser(credentials: Creds) { /* 50 lines */ }
+export function createOrder(data: OrderData) { /* 80 lines */ }
+export function sendEmail(to: string, body: string) { /* 40 lines */ }
+export function validateInput(schema: any, data: any) { /* 30 lines */ }","// auth/login.ts
+export async function loginUser(credentials: Creds): Promise<Session> { /* ... */ }
+
+// orders/create-order.ts
+export async function createOrder(data: OrderData): Promise<Order> { /* ... */ }
+
+// email/send-email.ts
+export async function sendEmail(to: string, body: string): Promise<void> { /* ... */ }",medium,ESLint rule max-lines and code review
+11,Missing Graceful Shutdown,Operations,"shutdown;SIGTERM;SIGINT;graceful;drain;cleanup",Developers do not handle process termination signals so the application dies immediately without cleaning up resources or finishing in-flight requests,"Abrupt shutdown kills in-progress requests causing errors for users. Database connections and file handles are left open potentially causing data corruption. In container orchestration environments like Kubernetes pods are killed ungracefully leading to dropped traffic.","Listen for SIGTERM and SIGINT signals. Stop accepting new connections and drain existing ones. Close database pools and flush logs before exiting. Set a timeout to force-exit if draining takes too long.","const server = app.listen(3000, () => {
+  console.log('Server running on port 3000');
+});","const server = app.listen(3000, () => {
+  logger.info('Server running on port 3000');
+});
+
+async function shutdown(signal: string): Promise<void> {
+  logger.info('Received ' + signal + ', shutting down gracefully');
+  server.close(() => { pool.end().then(() => process.exit(0)); });
+  setTimeout(() => process.exit(1), 10000);
+}
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));",high,Kubernetes liveness probes and integration tests
+12,Hardcoded Secrets,Security,"secrets;hardcoded;password;api key;credentials",Developers embed API keys and database passwords and tokens directly in source code files,"Secrets committed to version control are visible to anyone with repo access and persist in git history even after removal. Automated scanners and bots actively search public repositories for leaked credentials. Rotating compromised secrets requires code changes and redeployment.","Store secrets in environment variables or a secrets manager like AWS Secrets Manager or HashiCorp Vault. Use .env files for local development with .gitignore. Never commit secrets to version control.","const stripe = new Stripe('YOUR_STRIPE_SECRET_KEY', {
+  apiVersion: '2023-10-16',
+});
+
+const dbUrl = 'postgresql://admin:SuperSecret123@prod-db:5432/myapp';","const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!, {
+  apiVersion: '2023-10-16',
+});
+
+const dbUrl = process.env.DATABASE_URL;
+if (!dbUrl) throw new Error('DATABASE_URL is required');",critical,git-secrets and GitHub secret scanning and Gitleaks
+13,Overusing try/catch,Error Handling,"try;catch;error boundary;granularity;wrapping",Developers wrap every single function call or statement in its own try/catch block creating excessive error handling boilerplate that obscures business logic,"Excessive try/catch blocks make code harder to read and maintain. They often mask the real source of errors by catching too broadly. Many catches just re-throw or log the same way making the handling redundant and noisy.","Use try/catch at meaningful error boundaries such as request handlers or service method entry points. Let errors propagate naturally to centralized error handlers. Use middleware-level error handling in Express or similar frameworks.","async function getUser(id: string) {
+  try { const user = await db.findUser(id); } catch (e) { throw e; }
+  try { const prefs = await db.findPrefs(id); } catch (e) { throw e; }
+  try { const orders = await db.findOrders(id); } catch (e) { throw e; }
+  return { user, prefs, orders };
+}","async function getUser(id: string) {
+  const [user, prefs, orders] = await Promise.all([
+    db.findUser(id),
+    db.findPrefs(id),
+    db.findOrders(id),
+  ]);
+  return { user, prefs, orders };
+}
+// errors handled by Express error middleware",medium,Code review and ESLint rule no-useless-catch
+14,Not Using Connection Pooling,Database,"connection pool;database;connection;pool;per-request",Developers create a new database connection for every incoming request instead of reusing connections from a pool,"Creating and tearing down connections is expensive in terms of CPU and memory. Under load the database server runs out of available connections causing all requests to fail. TCP handshakes and TLS negotiation add significant latency to every query.","Use a connection pool with a configured minimum and maximum size. Libraries like pg and mysql2 support pooling natively. Monitor pool utilization and adjust size based on traffic patterns.","app.get('/users/:id', async (req, res) => {
+  const client = new Client({ connectionString: process.env.DATABASE_URL });
+  await client.connect();
+  const result = await client.query('SELECT * FROM users WHERE id = $1', [req.params.id]);
+  await client.end();
+  res.json(result.rows[0]);
+});","import { Pool } from 'pg';
+const pool = new Pool({ connectionString: process.env.DATABASE_URL, max: 20 });
+
+app.get('/users/:id', async (req, res) => {
+  const result = await pool.query('SELECT id, name, email FROM users WHERE id = $1', [req.params.id]);
+  res.json(result.rows[0]);
+});",high,Database connection metrics and APM tools like New Relic
+15,Barrel Export Performance,Modules,"barrel;index.ts;re-export;tree shaking;import performance",Developers create index.ts files that re-export everything from a module directory and then import just one thing from the barrel,"Importing from a barrel file causes Node.js to load and parse every module re-exported from that file even if only one export is needed. This dramatically slows down application startup and increases memory usage. Bundlers may not tree-shake effectively with barrel files.","Import directly from the specific file that contains the export you need. Reserve barrel files for genuinely public APIs of packages. Use tools like eslint-plugin-barrel-files to enforce direct imports.","// index.ts
+export * from './user-service';
+export * from './order-service';
+export * from './payment-service';
+export * from './email-service';
+
+// consumer.ts
+import { UserService } from './services';","// consumer.ts - import directly from the specific module
+import { UserService } from './services/user-service';",medium,eslint-plugin-barrel-files and startup time profiling
+16,Mutable Shared State,Concurrency,"mutable;shared state;race condition;concurrency;global state",Developers read and write shared module-level variables from multiple concurrent async operations assuming sequential execution,"Even though Node.js is single-threaded async operations interleave and can read stale values. Race conditions cause intermittent bugs that are extremely hard to reproduce. Shared counters or caches can give incorrect results under concurrent access.","Use atomic operations or transactions for shared state. Move shared state to Redis or a database with proper locking. Pass state explicitly through function parameters instead of relying on globals.","let requestCount = 0;
+let totalRevenue = 0;
+
+app.post('/purchase', async (req, res) => {
+  requestCount++;
+  const amount = await processPayment(req.body);
+  totalRevenue += amount;
+  res.json({ count: requestCount, revenue: totalRevenue });
+});","import { Redis } from 'ioredis';
+const redis = new Redis();
+
+app.post('/purchase', async (req, res) => {
+  const amount = await processPayment(req.body);
+  const [count, revenue] = await redis
+    .multi()
+    .incr('request:count')
+    .incrbyfloat('total:revenue', amount)
+    .exec();
+  res.json({ count: count![1], revenue: revenue![1] });
+});",high,Code review and race condition testing with concurrent requests
+17,Ignoring TypeScript Strict Mode,TypeScript,"strict;tsconfig;strictNullChecks;noImplicitAny;compiler options",Developers run TypeScript without enabling strict mode in tsconfig.json missing out on critical safety checks,"Without strict mode TypeScript allows null and undefined to be assigned to any type silently. Functions can have implicit any parameters. Dozens of real bugs are missed at compile time that would be caught with strict checks enabled.","Enable strict: true in tsconfig.json from the start of every project. For existing projects enable strict checks incrementally using individual flags like strictNullChecks and noImplicitAny. Fix violations rather than suppressing them.","// tsconfig.json
+{
+  ""compilerOptions"": {
+    ""target"": ""ES2022"",
+    ""module"": ""commonjs""
+  }
+}
+
+function findUser(id: string) {
+  return users.get(id); // could be undefined but no warning
+}","// tsconfig.json
+{
+  ""compilerOptions"": {
+    ""target"": ""ES2022"",
+    ""module"": ""commonjs"",
+    ""strict"": true
+  }
+}
+
+function findUser(id: string): User | undefined {
+  return users.get(id); // caller forced to handle undefined
+}",high,TypeScript compiler output and tsconfig.json review
+18,Console.log in Production,Observability,"console.log;logging;structured;observability;production logs",Developers use console.log for all logging in production applications including errors and debug output,"Console.log produces unstructured text that is difficult to parse and search in log aggregation systems. It has no log levels so there is no way to filter by severity. It lacks context like request IDs and timestamps in a consistent format. Performance suffers from synchronous stdout writes.","Use a structured logging library like pino or winston. Include log levels and contextual metadata. Use JSON format for machine-parseable logs. Correlate logs with request IDs for tracing.","app.get('/api/users/:id', async (req, res) => {
+  console.log('Getting user ' + req.params.id);
+  const user = await db.getUser(req.params.id);
+  console.log('Got user:', user);
+  res.json(user);
+});","import pino from 'pino';
+const logger = pino({ level: process.env.LOG_LEVEL || 'info' });
+
+app.get('/api/users/:id', async (req, res) => {
+  const log = logger.child({ requestId: req.id, userId: req.params.id });
+  log.info('Fetching user');
+  const user = await db.getUser(req.params.id);
+  log.debug({ user }, 'User retrieved');
+  res.json(user);
+});",medium,ESLint rule no-console and code review
+19,Nested Ternaries,Readability,"ternary;nested;conditional;readability;complex expression",Developers chain multiple ternary operators together to handle complex conditional logic in a single expression,"Deeply nested ternaries are extremely hard to read and reason about. The precedence rules are not intuitive and subtle bugs are easy to introduce. Code reviewers and future maintainers waste significant time trying to understand the logic.","Use if/else statements or switch/case for complex conditions. Extract conditional logic into well-named helper functions. Use early returns to reduce nesting.","const userLabel = user.isAdmin
+  ? user.isSuperAdmin
+    ? user.isActive ? 'Super Admin' : 'Inactive Super Admin'
+    : user.isActive ? 'Admin' : 'Inactive Admin'
+  : user.isActive ? 'User' : 'Inactive User';","function getUserLabel(user: User): string {
+  const status = user.isActive ? '' : 'Inactive ';
+  if (user.isSuperAdmin) return status + 'Super Admin';
+  if (user.isAdmin) return status + 'Admin';
+  return status + 'User';
+}
+const userLabel = getUserLabel(user);",medium,ESLint rule no-nested-ternary
+20,Not Handling Stream Errors,I/O,"stream;error;pipe;readable;writable;event",Developers create readable or writable streams and pipe them together without attaching error event handlers,"Unhandled stream errors crash the process with an unhandled exception. File read streams can fail if the file is deleted mid-read. Network streams can fail due to connection resets. The pipe method does not forward errors automatically between streams.","Always attach an error event handler to every stream. Use the pipeline utility from the stream module which handles errors and cleanup automatically. Use stream.promises.pipeline for async/await compatibility.","import fs from 'fs';
+import { createGzip } from 'zlib';
+
+const source = fs.createReadStream('input.txt');
+const gzip = createGzip();
+const dest = fs.createWriteStream('input.txt.gz');
+source.pipe(gzip).pipe(dest);","import fs from 'fs';
+import { createGzip } from 'zlib';
+import { pipeline } from 'stream/promises';
+
+async function compressFile(input: string, output: string): Promise<void> {
+  await pipeline(
+    fs.createReadStream(input),
+    createGzip(),
+    fs.createWriteStream(output)
+  );
+}",high,ESLint and code review for missing error handlers on streams
+21,Throwing Non-Error Objects,Error Handling,"throw;Error;string;stack trace;exception type",Developers throw plain strings or numbers or objects instead of proper Error instances,"Non-Error values lack a stack trace making it impossible to determine where the error originated. Logging libraries and error tracking services expect Error objects and may not handle strings correctly. Catch blocks that check error properties like message or code will fail.","Always throw instances of Error or a custom class that extends Error. Include descriptive messages and set a code property for programmatic error handling. Create domain-specific error classes for different failure types.","function withdraw(amount: number, balance: number): number {
+  if (amount > balance) {
+    throw 'Insufficient funds';
+  }
+  if (amount <= 0) {
+    throw { code: 400, reason: 'Invalid amount' };
+  }
+  return balance - amount;
+}","class InsufficientFundsError extends Error {
+  constructor(amount: number, balance: number) {
+    super('Cannot withdraw ' + amount + ' from balance of ' + balance);
+    this.name = 'InsufficientFundsError';
+  }
+}
+
+function withdraw(amount: number, balance: number): number {
+  if (amount > balance) throw new InsufficientFundsError(amount, balance);
+  if (amount <= 0) throw new RangeError('Amount must be positive');
+  return balance - amount;
+}",medium,ESLint rule no-throw-literal
+22,Storing Sessions in Memory,Scaling,"session;memory;scaling;horizontal;stateful",Developers use the default in-memory session store in frameworks like Express which keeps session data in process memory,"In-memory sessions are lost when the process restarts or crashes. When scaling horizontally behind a load balancer users lose their sessions if routed to a different instance. Memory usage grows with active sessions and is never reclaimed.","Use an external session store backed by Redis or a database. This allows sessions to survive restarts and be shared across multiple instances. Set appropriate TTL values so expired sessions are cleaned up automatically.","import session from 'express-session';
+
+app.use(session({
+  secret: process.env.SESSION_SECRET!,
+  resave: false,
+  saveUninitialized: false,
+}));","import session from 'express-session';
+import RedisStore from 'connect-redis';
+import { Redis } from 'ioredis';
+
+const redis = new Redis(process.env.REDIS_URL);
+app.use(session({
+  store: new RedisStore({ client: redis }),
+  secret: process.env.SESSION_SECRET!,
+  resave: false,
+  saveUninitialized: false,
+  cookie: { maxAge: 86400000 },
+}));",high,Load testing with multiple instances and session persistence checks
+23,Synchronous File Operations,I/O,"sync;readFileSync;writeFileSync;blocking;file system",Developers use synchronous fs methods like readFileSync and writeFileSync inside request handlers or middleware,"Synchronous file operations block the entire event loop while waiting for disk I/O. During this time no other request can be processed. On slow disks or network file systems this can block for seconds causing cascading timeouts for all clients.","Use async fs methods from fs.promises. Read config files synchronously only at startup before the server starts accepting requests. Cache file contents in memory if they are read frequently and do not change.","import fs from 'fs';
+
+app.get('/config', (req, res) => {
+  const raw = fs.readFileSync('/etc/app/config.json', 'utf-8');
+  const config = JSON.parse(raw);
+  res.json(config);
+});","import fs from 'fs/promises';
+
+app.get('/config', async (req, res) => {
+  const raw = await fs.readFile('/etc/app/config.json', 'utf-8');
+  const config = JSON.parse(raw);
+  res.json(config);
+});",high,ESLint rule no-sync and clinic.js event loop profiling
+24,Over-fetching from Database,Database,"SELECT *;over-fetch;performance;bandwidth;query optimization",Developers use SELECT * to fetch all columns from database tables when only a few columns are needed,"SELECT * returns unnecessary data wasting network bandwidth between the application and database. It loads large columns like TEXT and BLOB fields into memory even when unused. Schema changes can silently break application code that depends on column order or specific column names.","Select only the columns your application actually needs. Define explicit column lists in queries. Use TypeScript interfaces that match your selected columns. Consider database views for common query patterns.","interface User { id: string; name: string; email: string; }
+
+async function getUsers(): Promise<User[]> {
+  const result = await pool.query('SELECT * FROM users');
+  return result.rows;
+}","interface UserSummary { id: string; name: string; email: string; }
+
+async function getUsers(): Promise<UserSummary[]> {
+  const result = await pool.query('SELECT id, name, email FROM users');
+  return result.rows;
+}",medium,Query analysis tools and database slow query logs
+25,Not Using Parameterized Queries,Security,"parameterized;prepared statement;sql;concatenation;injection",Developers build SQL queries by concatenating user input strings directly into the query text instead of using parameter placeholders,"String concatenation allows SQL injection attacks where attackers can execute arbitrary SQL commands. Even without malicious intent special characters in user input like single quotes will break queries. This is the most common and dangerous web application vulnerability.","Always use parameterized queries with placeholder syntax like $1 or ?. Use an ORM or query builder that handles parameterization automatically. Apply input validation as an additional defense layer.","app.delete('/users/:id', async (req, res) => {
+  const id = req.params.id;
+  await pool.query('DELETE FROM users WHERE id = ' + id);
+  res.json({ deleted: true });
+});","app.delete('/users/:id', async (req, res) => {
+  const id = req.params.id;
+  const result = await pool.query('DELETE FROM users WHERE id = $1 RETURNING id', [id]);
+  if (result.rowCount === 0) return res.status(404).json({ error: 'User not found' });
+  res.json({ deleted: true });
+});",critical,ESLint plugin security and SAST tools like SonarQube

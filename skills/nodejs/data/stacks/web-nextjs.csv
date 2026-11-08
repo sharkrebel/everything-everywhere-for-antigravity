@@ -1,0 +1,657 @@
+No,Category,Guideline,Description,Do,Dont,Code Good,Code Bad,Severity,Docs URL
+1,Setup,"Use App Router project structure","Next.js App Router uses the app/ directory for file-based routing with React Server Components by default. Organize your project with a clear separation of app routes, components, and lib utilities.","Create an app/ directory with layout.tsx and page.tsx at the root; place shared components in a components/ folder and utilities in lib/","Do not mix pages/ and app/ directories for the same routes; do not put non-route files directly in app/ without a naming convention","// Recommended project structure
+// app/
+//   layout.tsx       <- Root layout
+//   page.tsx         <- Home page (/)
+//   globals.css
+//   dashboard/
+//     layout.tsx     <- Nested layout
+//     page.tsx       <- /dashboard
+// components/
+//   ui/button.tsx
+// lib/
+//   db.ts
+//   utils.ts","// BAD: Mixing pages/ and app/ for same routes
+// pages/
+//   index.tsx        <- Conflicts with app/page.tsx
+// app/
+//   page.tsx         <- Both define the / route
+//
+// BAD: No layout.tsx at root
+// app/
+//   page.tsx         <- Missing required root layout",critical,https://nextjs.org/docs/app/getting-started/project-structure
+2,Routing,"Use file-based routing with app directory","Next.js App Router maps the file system to URL paths. Each folder represents a route segment and page.tsx inside it makes the route publicly accessible. Use layout.tsx for shared UI across child routes.","Create a page.tsx file inside each route folder to define the route; use layout.tsx for shared wrappers","Do not create routes without page.tsx; do not use index.tsx naming (that is the Pages Router convention)","// app/about/page.tsx
+export default function AboutPage() {
+  return (
+    <main>
+      <h1>About Us</h1>
+      <p>Welcome to our application.</p>
+    </main>
+  );
+}","// BAD: Using Pages Router naming in app directory
+// app/about/index.tsx  <-- Wrong convention
+export default function About() {
+  return <h1>About</h1>;
+}
+// This file will NOT be recognized as a route",critical,https://nextjs.org/docs/app/building-your-application/routing
+3,Routing,"Use dynamic routes with [slug] and catch-all [...slug]","Dynamic segments are created by wrapping a folder name in square brackets [slug]. Catch-all segments use [...slug] and optional catch-all uses [[...slug]]. Access params via the params prop in server components.","Use [param] folders for single dynamic segments and [...param] for catch-all routes; always validate params","Do not use query strings for path-based navigation; do not forget to handle missing or invalid params","// app/blog/[slug]/page.tsx
+interface BlogPostProps {
+  params: Promise<{ slug: string }>;
+}
+
+export default async function BlogPost({ params }: BlogPostProps) {
+  const { slug } = await params;
+  const post = await getPost(slug);
+  if (!post) notFound();
+  return <article><h1>{post.title}</h1></article>;
+}","// BAD: Not validating dynamic params
+// app/blog/[slug]/page.tsx
+export default async function BlogPost({ params }: any) {
+  const { slug } = await params;
+  // No validation, no notFound() handling
+  const post = await db.post.findFirst({ where: { slug } });
+  return <h1>{post.title}</h1>; // Crashes if post is null
+}",critical,https://nextjs.org/docs/app/building-your-application/routing/dynamic-routes
+4,Routing,"Use route groups (folder) for layout organization","Route groups created with parentheses in folder names like (marketing) let you organize routes without affecting the URL structure. They are useful for applying different layouts to different sections.","Use (groupName) folders to group related routes that share a layout; use multiple root layouts via route groups","Do not create route groups that result in conflicting page.tsx files resolving to the same URL path","// app/(marketing)/layout.tsx
+export default function MarketingLayout({
+  children,
+}: { children: React.ReactNode }) {
+  return (
+    <div className=""marketing-theme"">
+      <nav>Marketing Nav</nav>
+      {children}
+    </div>
+  );
+}
+// app/(marketing)/about/page.tsx -> /about
+// app/(marketing)/pricing/page.tsx -> /pricing","// BAD: Two route groups with conflicting pages
+// app/(marketing)/page.tsx   -> resolves to /
+// app/(shop)/page.tsx        -> also resolves to /
+// This causes a build error!
+//
+// BAD: Nesting route groups unnecessarily
+// app/(group1)/(group2)/page.tsx
+// Adds confusion without organizational benefit",high,https://nextjs.org/docs/app/building-your-application/routing/route-groups
+5,Server Components,"Use Server Components by default","In the App Router all components are React Server Components (RSC) by default. They run only on the server, can directly access databases and file systems, and send zero JavaScript to the client.","Keep components as server components unless they need browser APIs or interactivity; fetch data directly in the component","Do not add ""use client"" to components that do not need interactivity; do not import client-only libraries in server components without ""use client""","// app/users/page.tsx (Server Component by default)
+import { db } from '@/lib/db';
+
+export default async function UsersPage() {
+  const users = await db.user.findMany({
+    orderBy: { createdAt: 'desc' },
+    take: 20,
+  });
+  return (
+    <ul>
+      {users.map(user => <li key={user.id}>{user.name}</li>)}
+    </ul>
+  );
+}","// BAD: Adding ""use client"" unnecessarily
+""use client"";
+import { useEffect, useState } from 'react';
+
+export default function UsersPage() {
+  const [users, setUsers] = useState([]);
+  useEffect(() => {
+    fetch('/api/users').then(r => r.json()).then(setUsers);
+  }, []);
+  return <ul>{users.map(u => <li key={u.id}>{u.name}</li>)}</ul>;
+}",critical,https://nextjs.org/docs/app/building-your-application/rendering/server-components
+6,Client Components,"Use ""use client"" directive for client-side interactivity","Add the ""use client"" directive at the top of files that need browser APIs, event handlers, useState, useEffect, or other React hooks. Keep client components as leaf nodes in the component tree for optimal performance.","Add ""use client"" only to components that require interactivity; keep client components small and focused at the leaves of the tree","Do not mark entire pages as client components; do not import server-only code in client components","// components/counter.tsx
+""use client"";
+
+import { useState } from 'react';
+
+export default function Counter() {
+  const [count, setCount] = useState(0);
+  return (
+    <button onClick={() => setCount(c => c + 1)}>
+      Count: {count}
+    </button>
+  );
+}","// BAD: Making the entire page a client component
+""use client"";
+// app/dashboard/page.tsx
+import { useState } from 'react';
+import { db } from '@/lib/db'; // ERROR: Cannot use server-only code
+
+export default function Dashboard() {
+  const [tab, setTab] = useState('overview');
+  const data = await db.query(); // Cannot use await in client component
+  return <div>{data}</div>;
+}",critical,https://nextjs.org/docs/app/building-your-application/rendering/client-components
+7,Server Actions,"Use server actions for form handling","Server Actions are async functions that run on the server, defined with ""use server"". They can be used in form action attributes for progressive enhancement and work without JavaScript enabled on the client.","Define server actions with ""use server"" in a separate file or inline; use them in form action props; validate inputs with zod or similar","Do not put ""use server"" in client components directly; do not skip input validation in server actions","// app/contacts/actions.ts
+""use server"";
+
+import { z } from 'zod';
+import { db } from '@/lib/db';
+import { revalidatePath } from 'next/cache';
+
+const schema = z.object({
+  name: z.string().min(1),
+  email: z.string().email(),
+});
+
+export async function createContact(formData: FormData) {
+  const parsed = schema.safeParse(Object.fromEntries(formData));
+  if (!parsed.success) return { error: parsed.error.flatten() };
+  await db.contact.create({ data: parsed.data });
+  revalidatePath('/contacts');
+}","// BAD: No validation in server action
+""use server"";
+
+export async function createContact(formData: FormData) {
+  const name = formData.get('name') as string;
+  const email = formData.get('email') as string;
+  // No validation! Trusting raw user input
+  await db.contact.create({ data: { name, email } });
+}",critical,https://nextjs.org/docs/app/building-your-application/data-fetching/server-actions-and-mutations
+8,Server Actions,"Use revalidatePath and revalidateTag after mutations","After performing a mutation with a server action call revalidatePath or revalidateTag to purge the cached data so the UI reflects the latest state. This integrates with the Next.js incremental cache.","Call revalidatePath for page-level cache clearing or revalidateTag for granular tag-based invalidation after mutations","Do not forget to revalidate after mutations; do not revalidate overly broad paths that cause unnecessary cache purges","// app/posts/actions.ts
+""use server"";
+
+import { revalidatePath } from 'next/cache';
+import { revalidateTag } from 'next/cache';
+import { db } from '@/lib/db';
+
+export async function updatePost(id: string, formData: FormData) {
+  const title = formData.get('title') as string;
+  await db.post.update({ where: { id }, data: { title } });
+  revalidateTag('posts');
+  revalidatePath(`/posts/${id}`);
+}","// BAD: Not revalidating after mutation
+""use server"";
+
+export async function updatePost(id: string, formData: FormData) {
+  const title = formData.get('title') as string;
+  await db.post.update({ where: { id }, data: { title } });
+  // Missing revalidation! UI shows stale data
+  // User must manually refresh the page
+}",high,https://nextjs.org/docs/app/building-your-application/caching#revalidating
+9,Data Fetching,"Use fetch() with caching in server components","In server components you can use the native fetch API with Next.js caching extensions. By default fetch results are cached. Use next.revalidate or cache: ""no-store"" to control caching behavior.","Use fetch() directly in server components with appropriate cache and revalidate options; colocate data fetching with the component that uses it","Do not fetch data in client components when server components can do it; do not forget to set revalidation for dynamic data","// app/products/page.tsx
+interface Product {
+  id: string;
+  name: string;
+  price: number;
+}
+
+export default async function ProductsPage() {
+  const res = await fetch('https://api.example.com/products', {
+    next: { revalidate: 3600, tags: ['products'] },
+  });
+  const products: Product[] = await res.json();
+  return (
+    <ul>
+      {products.map(p => <li key={p.id}>{p.name} - ${p.price}</li>)}
+    </ul>
+  );
+}","// BAD: Using client-side fetching for static data
+""use client"";
+import { useEffect, useState } from 'react';
+
+export default function ProductsPage() {
+  const [products, setProducts] = useState([]);
+  useEffect(() => {
+    fetch('https://api.example.com/products')
+      .then(r => r.json())
+      .then(setProducts);
+  }, []);
+  return <ul>{products.map(p => <li>{p.name}</li>)}</ul>;
+}",high,https://nextjs.org/docs/app/building-your-application/data-fetching/fetching
+10,Data Fetching,"Use parallel data fetching for performance","When a component needs multiple independent data sources fetch them in parallel using Promise.all instead of sequentially. This reduces total loading time by running requests concurrently.","Use Promise.all to fetch independent data in parallel; start all promises before awaiting any of them","Do not await each fetch sequentially when the requests are independent; do not create waterfall fetching patterns","// app/dashboard/page.tsx
+async function getUser(id: string) {
+  const res = await fetch(`https://api.example.com/users/${id}`);
+  return res.json();
+}
+
+async function getAnalytics(id: string) {
+  const res = await fetch(`https://api.example.com/analytics/${id}`);
+  return res.json();
+}
+
+export default async function Dashboard() {
+  const [user, analytics] = await Promise.all([
+    getUser('123'),
+    getAnalytics('123'),
+  ]);
+  return <div><h1>{user.name}</h1><p>{analytics.views} views</p></div>;
+}","// BAD: Sequential waterfall fetching
+export default async function Dashboard() {
+  const user = await getUser('123');
+  // Waits for user before starting analytics fetch
+  const analytics = await getAnalytics('123');
+  // Total time = user fetch + analytics fetch
+  // Instead of max(user fetch, analytics fetch)
+  return <div><h1>{user.name}</h1></div>;
+}",high,https://nextjs.org/docs/app/building-your-application/data-fetching/fetching#parallel-data-fetching
+11,Caching,"Use request deduplication and cache strategies","Next.js automatically deduplicates fetch requests with the same URL and options during a single render pass. Understand the four caching layers: request memoization, data cache, full route cache, and router cache.","Rely on automatic request deduplication for the same fetch across components; use cache: ""no-store"" for always-fresh data and next.revalidate for time-based revalidation","Do not manually implement request deduplication; do not set cache: ""no-store"" on every fetch as it disables all caching benefits","// Automatic deduplication: both components share one request
+// app/layout.tsx
+async function getSettings() {
+  const res = await fetch('https://api.example.com/settings', {
+    next: { revalidate: 3600 },
+  });
+  return res.json();
+}
+
+// Used in layout
+export default async function Layout({ children }: { children: React.ReactNode }) {
+  const settings = await getSettings();
+  return <html lang={settings.locale}><body>{children}</body></html>;
+}
+
+// Same fetch in page is deduplicated automatically","// BAD: Disabling cache everywhere
+export default async function Page() {
+  const data = await fetch('https://api.example.com/data', {
+    cache: 'no-store', // Disables ALL caching unnecessarily
+  });
+  const settings = await fetch('https://api.example.com/settings', {
+    cache: 'no-store', // Static data should be cached!
+  });
+  return <div>{JSON.stringify(data)}</div>;
+}",high,https://nextjs.org/docs/app/building-your-application/caching#request-memoization
+12,Caching,"Use unstable_cache and next.revalidate for granular caching","For non-fetch data sources like database queries use the unstable_cache wrapper (or the React cache function) to enable caching with tags and revalidation. Set next.revalidate on fetch for time-based invalidation.","Wrap database calls with unstable_cache and provide meaningful tags; use next.revalidate with fetch for ISR-like behavior","Do not call the database without caching in production for read-heavy routes; do not forget to add tags so you can revalidate granularly","// lib/data.ts
+import { unstable_cache } from 'next/cache';
+import { db } from '@/lib/db';
+
+export const getCachedPosts = unstable_cache(
+  async (authorId: string) => {
+    return db.post.findMany({
+      where: { authorId },
+      orderBy: { createdAt: 'desc' },
+    });
+  },
+  ['posts-by-author'],
+  { revalidate: 600, tags: ['posts'] }
+);
+
+// app/author/[id]/page.tsx
+export default async function AuthorPage({ params }: { params: Promise<{ id: string }> }) {
+  const { id } = await params;
+  const posts = await getCachedPosts(id);
+  return <ul>{posts.map(p => <li key={p.id}>{p.title}</li>)}</ul>;
+}","// BAD: Uncached database query on every request
+// app/author/[id]/page.tsx
+export default async function AuthorPage({ params }: { params: Promise<{ id: string }> }) {
+  const { id } = await params;
+  // Hits the database on every single request
+  const posts = await db.post.findMany({
+    where: { authorId: id },
+  });
+  return <ul>{posts.map(p => <li key={p.id}>{p.title}</li>)}</ul>;
+}",medium,https://nextjs.org/docs/app/api-reference/functions/unstable_cache
+13,Middleware,"Use middleware for auth redirects and i18n","Next.js middleware runs before every matched request at the edge. Use it for authentication checks, redirects, internationalization, and request header manipulation. Define it in middleware.ts at the project root.","Create a middleware.ts at the project root; use the matcher config to limit which routes it runs on; keep middleware lightweight","Do not put heavy computation or database queries in middleware; do not forget the matcher config causing it to run on static assets","// middleware.ts
+import { NextResponse } from 'next/server';
+import type { NextRequest } from 'next/server';
+
+export function middleware(request: NextRequest) {
+  const token = request.cookies.get('session')?.value;
+  if (!token && request.nextUrl.pathname.startsWith('/dashboard')) {
+    return NextResponse.redirect(new URL('/login', request.url));
+  }
+  return NextResponse.next();
+}
+
+export const config = {
+  matcher: ['/dashboard/:path*', '/settings/:path*'],
+};","// BAD: No matcher config, runs on every request including static files
+// middleware.ts
+import { NextResponse } from 'next/server';
+
+export async function middleware(request: any) {
+  // Runs on EVERY request: images, CSS, JS, etc.
+  const user = await db.user.findUnique({ where: { id: '1' } });
+  if (!user) return NextResponse.redirect(new URL('/login', request.url));
+  return NextResponse.next();
+}
+// Missing config.matcher!",high,https://nextjs.org/docs/app/building-your-application/routing/middleware
+14,Layouts,"Use root layout and nested layouts","The root layout in app/layout.tsx is required and must include html and body tags. Nested layouts wrap child routes and preserve state during navigation. They are ideal for shared navigation and sidebars.","Create a root layout.tsx with html and body tags; use nested layouts for shared UI per route group; pass children as a prop","Do not omit the root layout; do not put html/body tags in nested layouts; do not use layouts for data that changes per page","// app/layout.tsx
+import type { Metadata } from 'next';
+import { Inter } from 'next/font/google';
+import './globals.css';
+
+const inter = Inter({ subsets: ['latin'] });
+
+export const metadata: Metadata = {
+  title: 'My App',
+  description: 'Built with Next.js',
+};
+
+export default function RootLayout({
+  children,
+}: { children: React.ReactNode }) {
+  return (
+    <html lang=""en"">
+      <body className={inter.className}>{children}</body>
+    </html>
+  );
+}","// BAD: Missing required html/body in root layout
+// app/layout.tsx
+export default function RootLayout({ children }: { children: React.ReactNode }) {
+  return <div>{children}</div>; // Missing html and body tags!
+}
+
+// BAD: Duplicating html/body in nested layout
+// app/dashboard/layout.tsx
+export default function DashLayout({ children }: { children: React.ReactNode }) {
+  return <html><body><nav>Dash</nav>{children}</body></html>;
+}",critical,https://nextjs.org/docs/app/building-your-application/routing/layouts-and-templates
+15,Loading/Error,"Use loading.tsx and error.tsx conventions","Next.js uses special file conventions: loading.tsx creates an instant loading UI with React Suspense, error.tsx creates an error boundary that catches errors in the route segment. Both receive automatic wrapping.","Create loading.tsx for skeleton UIs during data fetching; create error.tsx as a client component with a retry mechanism","Do not forget that error.tsx must be a client component; do not create loading states manually when loading.tsx works","// app/dashboard/loading.tsx
+export default function DashboardLoading() {
+  return (
+    <div className=""animate-pulse"">
+      <div className=""h-8 bg-gray-200 rounded w-1/4 mb-4"" />
+      <div className=""h-64 bg-gray-200 rounded"" />
+    </div>
+  );
+}
+
+// app/dashboard/error.tsx
+""use client"";
+export default function DashboardError({
+  error,
+  reset,
+}: { error: Error & { digest?: string }; reset: () => void }) {
+  return (
+    <div>
+      <h2>Something went wrong!</h2>
+      <button onClick={() => reset()}>Try again</button>
+    </div>
+  );
+}","// BAD: Manual loading state instead of loading.tsx
+""use client"";
+import { useState, useEffect } from 'react';
+
+export default function Dashboard() {
+  const [loading, setLoading] = useState(true);
+  const [data, setData] = useState(null);
+  useEffect(() => {
+    fetch('/api/data').then(r => r.json()).then(d => {
+      setData(d);
+      setLoading(false);
+    });
+  }, []);
+  if (loading) return <div>Loading...</div>;
+  return <div>{JSON.stringify(data)}</div>;
+}",high,https://nextjs.org/docs/app/building-your-application/routing/loading-ui-and-streaming
+16,API Routes,"Use Route Handlers for API endpoints","Route Handlers are defined in route.ts files inside the app directory. They support standard HTTP methods (GET, POST, PUT, DELETE, PATCH) as named exports. They run on the server and can access all Node.js APIs.","Export named functions matching HTTP methods from route.ts files; return NextResponse with proper status codes and content types","Do not create route.ts in the same folder as page.tsx; do not use the old pages/api convention with App Router","// app/api/posts/route.ts
+import { NextRequest, NextResponse } from 'next/server';
+import { db } from '@/lib/db';
+
+export async function GET(request: NextRequest) {
+  const searchParams = request.nextUrl.searchParams;
+  const page = parseInt(searchParams.get('page') ?? '1');
+  const posts = await db.post.findMany({ skip: (page - 1) * 10, take: 10 });
+  return NextResponse.json(posts);
+}
+
+export async function POST(request: NextRequest) {
+  const body = await request.json();
+  const post = await db.post.create({ data: body });
+  return NextResponse.json(post, { status: 201 });
+}","// BAD: Using pages/api convention in App Router project
+// pages/api/posts.ts  <-- Old convention
+import type { NextApiRequest, NextApiResponse } from 'next';
+
+export default function handler(req: NextApiRequest, res: NextApiResponse) {
+  if (req.method === 'GET') {
+    res.status(200).json({ posts: [] });
+  }
+}",high,https://nextjs.org/docs/app/building-your-application/routing/route-handlers
+17,API Routes,"Use streaming responses with ReadableStream","Route Handlers can stream responses using the Web Streams API. This is useful for server-sent events, AI chat responses, and large data transfers where you want to send data incrementally.","Use ReadableStream in Route Handlers for streaming; set appropriate Content-Type headers for SSE or streaming responses","Do not buffer entire large responses in memory before sending; do not forget to close the stream when done","// app/api/chat/route.ts
+import { NextRequest } from 'next/server';
+
+export async function POST(request: NextRequest) {
+  const { prompt } = await request.json();
+  const encoder = new TextEncoder();
+  const stream = new ReadableStream({
+    async start(controller) {
+      const chunks = await getAIResponse(prompt);
+      for await (const chunk of chunks) {
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify(chunk)}\n\n`));
+      }
+      controller.close();
+    },
+  });
+  return new Response(stream, {
+    headers: { 'Content-Type': 'text/event-stream' },
+  });
+}","// BAD: Buffering entire response before sending
+// app/api/chat/route.ts
+export async function POST(request: Request) {
+  const { prompt } = await request.json();
+  // Waits for ALL chunks before sending anything
+  const allChunks: string[] = [];
+  for await (const chunk of await getAIResponse(prompt)) {
+    allChunks.push(chunk);
+  }
+  return Response.json({ response: allChunks.join('') });
+  // User sees nothing until entire response is complete
+}",medium,https://nextjs.org/docs/app/building-your-application/routing/route-handlers#streaming
+18,Authentication,"Use NextAuth.js / Auth.js for authentication","Auth.js (NextAuth.js v5) provides a complete authentication solution for Next.js with support for OAuth providers, credentials, and session management. It integrates with the App Router middleware and server components.","Configure Auth.js in auth.ts at the project root; use the auth() helper in server components and middleware; protect routes via middleware","Do not store raw passwords; do not implement custom session management when Auth.js handles it; do not expose session tokens to client components","// auth.ts
+import NextAuth from 'next-auth';
+import GitHub from 'next-auth/providers/github';
+import { PrismaAdapter } from '@auth/prisma-adapter';
+import { prisma } from '@/lib/prisma';
+
+export const { handlers, auth, signIn, signOut } = NextAuth({
+  adapter: PrismaAdapter(prisma),
+  providers: [GitHub],
+});
+
+// app/api/auth/[...nextauth]/route.ts
+import { handlers } from '@/auth';
+export const { GET, POST } = handlers;
+
+// app/profile/page.tsx
+import { auth } from '@/auth';
+import { redirect } from 'next/navigation';
+
+export default async function Profile() {
+  const session = await auth();
+  if (!session) redirect('/login');
+  return <h1>Hello {session.user?.name}</h1>;
+}","// BAD: Rolling custom auth without proper security
+// app/api/login/route.ts
+export async function POST(req: Request) {
+  const { email, password } = await req.json();
+  const user = await db.user.findUnique({ where: { email } });
+  if (user?.password === password) { // Plain text comparison!
+    const token = btoa(user.id); // Not a real JWT!
+    return Response.json({ token });
+  }
+  return Response.json({ error: 'Invalid' }, { status: 401 });
+}",critical,https://nextjs.org/docs/app/building-your-application/authentication
+19,Database,"Use Prisma with server components for direct DB access","Prisma ORM integrates seamlessly with Next.js server components for type-safe database access. Create a singleton PrismaClient instance to avoid connection pool exhaustion during development hot reloads.","Create a global singleton PrismaClient in lib/prisma.ts; use Prisma directly in server components and server actions; leverage Prisma types for end-to-end type safety","Do not create a new PrismaClient on every request; do not import Prisma in client components; do not expose database queries in client-side code","// lib/prisma.ts
+import { PrismaClient } from '@prisma/client';
+
+const globalForPrisma = globalThis as unknown as {
+  prisma: PrismaClient | undefined;
+};
+
+export const prisma = globalForPrisma.prisma ?? new PrismaClient();
+if (process.env.NODE_ENV !== 'production') globalForPrisma.prisma = prisma;
+
+// app/posts/page.tsx
+import { prisma } from '@/lib/prisma';
+
+export default async function PostsPage() {
+  const posts = await prisma.post.findMany({
+    include: { author: true },
+    orderBy: { createdAt: 'desc' },
+  });
+  return <ul>{posts.map(p => <li key={p.id}>{p.title} by {p.author.name}</li>)}</ul>;
+}","// BAD: New PrismaClient on every request
+// app/posts/page.tsx
+import { PrismaClient } from '@prisma/client';
+
+export default async function PostsPage() {
+  const prisma = new PrismaClient(); // Creates new connection each time!
+  const posts = await prisma.post.findMany();
+  // Connection pool exhaustion in development
+  // Too many database connections in production
+  return <ul>{posts.map(p => <li key={p.id}>{p.title}</li>)}</ul>;
+}",critical,https://nextjs.org/docs/app/building-your-application/configuring/environment-variables
+20,Environment Variables,"Use NEXT_PUBLIC_ prefix for client exposure","Next.js only exposes environment variables prefixed with NEXT_PUBLIC_ to the browser bundle. Server-only secrets must never have this prefix. Access server variables directly via process.env in server components.","Prefix client-needed variables with NEXT_PUBLIC_; keep API keys and secrets without the prefix; use .env.local for local development","Do not expose API keys or secrets with the NEXT_PUBLIC_ prefix; do not access non-prefixed env vars in client components","// .env.local
+DATABASE_URL=""postgresql://user:pass@localhost:5432/mydb""
+API_SECRET_KEY=""sk-secret-key-never-expose""
+NEXT_PUBLIC_APP_URL=""https://myapp.com""
+NEXT_PUBLIC_ANALYTICS_ID=""G-XXXXXXXXXX""
+
+// app/page.tsx (Server Component - can access all env vars)
+const dbUrl = process.env.DATABASE_URL; // Works on server
+
+// components/analytics.tsx (Client Component)
+""use client"";
+const analyticsId = process.env.NEXT_PUBLIC_ANALYTICS_ID; // Works on client","// BAD: Exposing secrets to the client
+// .env.local
+NEXT_PUBLIC_DATABASE_URL=""postgresql://user:pass@host/db""
+NEXT_PUBLIC_API_SECRET=""sk-secret-key""
+// These are now visible in the browser bundle!
+
+// BAD: Trying to use server vars in client component
+""use client"";
+export function Config() {
+  const secret = process.env.API_SECRET; // undefined on client!
+  return <div>{secret}</div>;
+}",critical,https://nextjs.org/docs/app/building-your-application/configuring/environment-variables
+21,Image Optimization,"Use next/image for optimized image loading","The next/image component automatically optimizes images with lazy loading, responsive sizing, and modern formats (WebP/AVIF). It prevents layout shift by requiring width and height or using the fill prop.","Use the Image component from next/image with explicit width/height or the fill prop; use priority for above-the-fold images; configure remotePatterns for external images","Do not use plain img tags; do not skip width and height causing layout shift; do not forget to configure remotePatterns in next.config for external images","// app/hero/page.tsx
+import Image from 'next/image';
+
+export default function HeroSection() {
+  return (
+    <section>
+      <Image
+        src=""/hero.jpg""
+        alt=""Hero banner showing product showcase""
+        width={1200}
+        height={630}
+        priority
+        className=""rounded-lg""
+      />
+    </section>
+  );
+}","// BAD: Using plain img tag
+export default function HeroSection() {
+  return (
+    <section>
+      {/* No optimization, no lazy loading, causes layout shift */}
+      <img src=""/hero.jpg"" />
+      {/* No alt text, no dimensions specified */}
+      <img src=""https://cdn.example.com/avatar.jpg"" />
+    </section>
+  );
+}",high,https://nextjs.org/docs/app/api-reference/components/image
+22,Metadata,"Use generateMetadata for dynamic SEO","Next.js provides a Metadata API for defining page metadata. Use the static metadata export for fixed values and the generateMetadata function for dynamic metadata that depends on route params or fetched data.","Export a metadata object for static pages or an async generateMetadata function for dynamic pages; include title, description, and Open Graph tags","Do not use manual head tags; do not duplicate metadata across pages when layouts can define shared defaults","// app/blog/[slug]/page.tsx
+import type { Metadata } from 'next';
+import { db } from '@/lib/db';
+
+export async function generateMetadata(
+  { params }: { params: Promise<{ slug: string }> }
+): Promise<Metadata> {
+  const { slug } = await params;
+  const post = await db.post.findUnique({ where: { slug } });
+  return {
+    title: post?.title ?? 'Blog Post',
+    description: post?.excerpt ?? 'Read our latest blog post',
+    openGraph: {
+      title: post?.title,
+      images: [post?.coverImage ?? '/default-og.jpg'],
+    },
+  };
+}","// BAD: Manual head manipulation instead of Metadata API
+export default function BlogPost() {
+  return (
+    <>
+      {/* This does not work properly in App Router */}
+      <head>
+        <title>My Post</title>
+        <meta name=""description"" content=""A post"" />
+      </head>
+      <article>Content here</article>
+    </>
+  );
+}",high,https://nextjs.org/docs/app/building-your-application/optimizing/metadata
+23,TypeScript,"Use typed page props and params","Next.js App Router provides specific TypeScript types for page and layout props. Always type your params and searchParams as Promise types (Next.js 15+) and use proper interfaces for full type safety.","Define explicit interfaces for page props with params as Promise<{ key: string }>; use the generated types from next for PageProps; validate params at runtime","Do not use any type for page props; do not assume params are always present without validation; do not skip the Promise type for params in Next.js 15+","// app/products/[id]/page.tsx
+import { notFound } from 'next/navigation';
+import { db } from '@/lib/db';
+
+interface ProductPageProps {
+  params: Promise<{ id: string }>;
+  searchParams: Promise<{ [key: string]: string | string[] | undefined }>;
+}
+
+export default async function ProductPage({ params, searchParams }: ProductPageProps) {
+  const { id } = await params;
+  const { variant } = await searchParams;
+  const product = await db.product.findUnique({ where: { id } });
+  if (!product) notFound();
+  return <h1>{product.name}</h1>;
+}","// BAD: Untyped page props
+// app/products/[id]/page.tsx
+export default async function ProductPage({ params, searchParams }: any) {
+  const id = params.id; // No type safety, missing await
+  // TypeScript cannot catch errors here
+  const product = await db.product.findUnique({
+    where: { id: parseInt(id) }, // Might be NaN
+  });
+  return <h1>{product.name}</h1>; // product might be null
+}",high,https://nextjs.org/docs/app/building-your-application/configuring/typescript
+24,Performance,"Leverage React Server Components for performance","React Server Components reduce the JavaScript bundle sent to clients by keeping server-only code on the server. Components that fetch data, access backends, or use large dependencies should remain server components.","Keep data-fetching and heavy-dependency components as server components; use Suspense boundaries for streaming; push client interactivity to leaf components","Do not add ""use client"" to data-fetching components; do not import large server-only libraries in client components; do not wrap entire subtrees in a single client component","// Optimal component composition pattern
+// app/dashboard/page.tsx (Server Component)
+import { Suspense } from 'react';
+import { RevenueChart } from '@/components/revenue-chart';
+import { InteractiveFilters } from '@/components/filters';
+
+export default async function Dashboard() {
+  return (
+    <main>
+      <h1>Dashboard</h1>
+      <InteractiveFilters />
+      <Suspense fallback={<div>Loading chart...</div>}>
+        <RevenueChart />
+      </Suspense>
+    </main>
+  );
+}","// BAD: Entire dashboard as a client component
+""use client"";
+import { useState, useEffect } from 'react';
+import { Chart } from 'chart.js'; // 200KB+ library sent to client
+
+export default function Dashboard() {
+  const [data, setData] = useState(null);
+  useEffect(() => {
+    fetch('/api/revenue').then(r => r.json()).then(setData);
+  }, []);
+  // All code shipped to client, slow initial load
+  // No streaming, no Suspense benefits
+  return <div><Chart data={data} /></div>;
+}",critical,https://nextjs.org/docs/app/building-your-application/rendering/server-components#benefits
+25,Deployment,"Configure standalone output for Docker and self-hosting","Next.js supports multiple deployment targets. Use output: ""standalone"" in next.config for Docker deployments to create a minimal self-contained build. Vercel deployments work automatically with zero config.","Set output: ""standalone"" in next.config.ts for Docker/self-hosted; use a multi-stage Dockerfile; copy public/ and .next/static/ alongside the standalone output","Do not deploy the full node_modules to production; do not skip the public/ and .next/static/ copy step in Docker; do not hardcode environment variables at build time","// next.config.ts
+import type { NextConfig } from 'next';
+
+const nextConfig: NextConfig = {
+  output: 'standalone',
+};
+
+export default nextConfig;
+
+// Dockerfile
+// FROM node:20-alpine AS builder
+// WORKDIR /app
+// COPY package*.json ./
+// RUN npm ci
+// COPY . .
+// RUN npm run build
+// FROM node:20-alpine AS runner
+// WORKDIR /app
+// COPY --from=builder /app/.next/standalone ./
+// COPY --from=builder /app/public ./public
+// COPY --from=builder /app/.next/static ./.next/static
+// CMD [""node"", ""server.js""]","// BAD: Deploying with full node_modules
+// Dockerfile
+// FROM node:20
+// WORKDIR /app
+// COPY . .
+// RUN npm install          # Installs ALL deps including devDependencies
+// RUN npm run build
+// CMD [""npm"", ""start""]     # Huge image, slow startup
+// # No standalone output, no multi-stage build
+// # Final image is 1GB+ instead of ~100MB",medium,https://nextjs.org/docs/app/building-your-application/deploying

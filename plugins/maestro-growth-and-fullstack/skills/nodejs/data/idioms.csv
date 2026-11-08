@@ -1,0 +1,611 @@
+No,Idiom,Category,Keywords,Description,Do,Dont,Code Good,Code Bad,Docs URL
+1,Barrel Exports,Module Organization,"barrel, index, re-export, module","Use index.ts files to re-export public APIs from a directory, providing a clean import surface and hiding internal module structure.",Create an index.ts in each feature directory that explicitly re-exports only the public API.,Do not re-export everything with wildcard exports or expose internal implementation details through barrel files.,"// src/users/index.ts
+export { UserService } from './user.service';
+export { UserController } from './user.controller';
+export type { User, CreateUserDto } from './user.types';
+
+// src/app.ts
+import { UserService, UserController } from './users';","// src/users/index.ts
+export * from './user.service';
+export * from './user.repository';
+export * from './user.types';
+export * from './internal-helpers'; // leaks internals
+
+// src/app.ts
+import { _internalHelper } from './users'; // should not be accessible",https://typescript-eslint.io/rules/no-restricted-imports/
+2,Nullish Coalescing (??),Operators,"nullish, coalescing, null, undefined, default","Use ?? to provide default values only when the left operand is null or undefined, unlike || which also triggers on falsy values like 0 or empty string.",Use ?? when 0 or empty string are valid values that should not be replaced by a default.,Do not use || for default values when falsy values like 0 or empty string are meaningful.,"const port = process.env.PORT ?? 3000;
+const count = userInput ?? 10;
+// count is 0 if userInput is 0 (valid)
+// count is 10 only if userInput is null/undefined
+
+const name = config.name ?? 'default';","const port = process.env.PORT || 3000;
+// Bug: if PORT is '0', it becomes 3000
+const count = userInput || 10;
+// Bug: if userInput is 0, it becomes 10
+
+const name = config.name || 'default';
+// Bug: if name is '', it becomes 'default'",https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Operators/Nullish_coalescing
+3,Optional Chaining (?.),Operators,"optional, chaining, null, safe, access","Use ?. to safely access deeply nested properties without explicit null checks at each level. Returns undefined if any part of the chain is null or undefined.",Use optional chaining for accessing properties on objects that may be null or undefined.,Do not overuse optional chaining on properties that should always exist as it can mask bugs.,"interface User {
+  address?: {
+    street?: string;
+    city?: string;
+  };
+}
+
+const city = user?.address?.city;
+const firstItem = arr?.[0];
+const result = obj?.method?.();","interface User {
+  address?: {
+    street?: string;
+    city?: string;
+  };
+}
+
+// Verbose null checking
+let city: string | undefined;
+if (user && user.address && user.address.city) {
+  city = user.address.city;
+}
+
+// Dangerous: no null check at all
+const street = user.address.street; // throws if address is undefined",https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Operators/Optional_chaining
+4,as const Assertions,Type Safety,"const, assertion, literal, readonly, immutable","Use as const to narrow literal types and make objects/arrays deeply readonly. This enables TypeScript to infer the most specific types possible.",Use as const for configuration objects and string literal unions to get precise type inference.,Do not use as const on mutable data structures that need to be modified after creation.,"const ROLES = ['admin', 'editor', 'viewer'] as const;
+type Role = (typeof ROLES)[number]; // 'admin' | 'editor' | 'viewer'
+
+const CONFIG = {
+  api: 'https://api.example.com',
+  timeout: 5000,
+} as const;
+// CONFIG.api is type 'https://api.example.com', not string","const ROLES = ['admin', 'editor', 'viewer'];
+type Role = string; // too broad, allows any string
+
+const CONFIG = {
+  api: 'https://api.example.com',
+  timeout: 5000,
+};
+// CONFIG.api is type string -- loses specificity
+// CONFIG.timeout is type number -- not 5000",https://www.typescriptlang.org/docs/handbook/release-notes/typescript-3-4.html#const-assertions
+5,satisfies Operator,Type Safety,"satisfies, type checking, inference, validation","Use the satisfies operator to validate that an expression matches a type while preserving the most specific inferred type, combining type safety with precise inference.",Use satisfies to validate object shapes while keeping narrow literal types for autocomplete and type checking.,Do not use type annotations (: Type) when you want to preserve literal type inference; use satisfies instead.,"type Colors = Record<string, [number, number, number] | string>;
+
+const palette = {
+  red: [255, 0, 0],
+  green: '#00ff00',
+  blue: [0, 0, 255],
+} satisfies Colors;
+
+// palette.green is still type string, not string | number[]
+const greenHex = palette.green.toUpperCase(); // works!","type Colors = Record<string, [number, number, number] | string>;
+
+const palette: Colors = {
+  red: [255, 0, 0],
+  green: '#00ff00',
+  blue: [0, 0, 255],
+};
+
+// palette.green is string | [number, number, number]
+// const greenHex = palette.green.toUpperCase(); // Error!",https://www.typescriptlang.org/docs/handbook/release-notes/typescript-4-9.html#the-satisfies-operator
+6,Template Literals for Strings,Strings,"template, literal, string, interpolation, backtick","Use template literals (backticks) for string interpolation and multiline strings instead of string concatenation.",Use template literals for any string that includes variables or spans multiple lines.,Do not use string concatenation with + for building strings with dynamic values.,"const greeting = `Hello, ${user.name}!`;
+const url = `${baseUrl}/api/v${version}/users/${id}`;
+
+const query = `
+  SELECT *
+  FROM users
+  WHERE id = $1
+    AND active = true
+`;
+
+const message = `Found ${count} item${count !== 1 ? 's' : ''}`;","const greeting = 'Hello, ' + user.name + '!';
+const url = baseUrl + '/api/v' + version + '/users/' + id;
+
+const query = 'SELECT * ' +
+  'FROM users ' +
+  'WHERE id = $1 ' +
+  'AND active = true';
+
+const message = 'Found ' + count + ' item' + (count !== 1 ? 's' : '');",https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Template_literals
+7,ESM vs CJS (import vs require),Modules,"esm, cjs, import, require, module","Prefer ECMAScript Modules (ESM) with import/export syntax over CommonJS require/module.exports for modern Node.js and TypeScript projects.","Use ESM imports with explicit file extensions in pure Node.js projects, or let your bundler/TypeScript handle resolution.",Do not mix require() and import in the same project unless absolutely necessary for legacy compatibility.,"// package.json: { ""type"": ""module"" }
+
+// math.ts
+export function add(a: number, b: number): number {
+  return a + b;
+}
+
+// app.ts
+import { add } from './math.js';
+import { readFile } from 'node:fs/promises';
+
+const sum = add(1, 2);","// math.js
+module.exports = {
+  add: function(a, b) {
+    return a + b;
+  }
+};
+
+// app.js
+const { add } = require('./math');
+const fs = require('fs');
+
+const sum = add(1, 2);",https://nodejs.org/api/esm.html
+8,Strict TypeScript Config,Configuration,"tsconfig, strict, typescript, compiler, options","Enable strict mode and other safety-focused compiler options in tsconfig.json to catch more errors at compile time.",Enable strict mode and add additional safety checks like noUncheckedIndexedAccess and exactOptionalPropertyTypes.,Do not leave strict mode off or disable individual strict checks without a documented reason.,"// tsconfig.json
+{
+  ""compilerOptions"": {
+    ""strict"": true,
+    ""noUncheckedIndexedAccess"": true,
+    ""exactOptionalPropertyTypes"": true,
+    ""noImplicitReturns"": true,
+    ""noFallthroughCasesInSwitch"": true,
+    ""forceConsistentCasingInFileNames"": true,
+    ""moduleResolution"": ""bundler"",
+    ""target"": ""ES2022"",
+    ""module"": ""ES2022""
+  }
+}","// tsconfig.json
+{
+  ""compilerOptions"": {
+    ""strict"": false,
+    ""target"": ""es5"",
+    ""module"": ""commonjs""
+  }
+}
+// No strict checks, outdated target, missing safety options",https://www.typescriptlang.org/tsconfig#strict
+9,Environment Variable Validation (Zod),Configuration,"env, zod, validation, environment, config","Use Zod to validate and parse environment variables at startup so that missing or malformed values cause an immediate and clear failure.",Define an env schema with Zod and parse process.env at application startup. Export the validated config object.,Do not access process.env directly throughout the codebase without validation.,"import { z } from 'zod';
+
+const envSchema = z.object({
+  PORT: z.coerce.number().default(3000),
+  DATABASE_URL: z.string().url(),
+  NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
+  JWT_SECRET: z.string().min(32),
+});
+
+export const env = envSchema.parse(process.env);
+// env.PORT is number, env.DATABASE_URL is string -- fully typed","// Scattered across codebase with no validation
+const port = parseInt(process.env.PORT!); // might be NaN
+const dbUrl = process.env.DATABASE_URL; // might be undefined
+const env = process.env.NODE_ENV; // might be anything
+
+// Runtime crash later when dbUrl is undefined
+const connection = createConnection(dbUrl); // Error!",https://zod.dev/
+10,Graceful Shutdown,Process Management,"shutdown, graceful, signal, cleanup, process","Handle SIGTERM and SIGINT signals to gracefully close connections and finish in-flight requests before the process exits.",Register shutdown handlers that close database connections and HTTP servers and set a timeout for forced exit.,Do not let the process crash without cleaning up resources or ignore shutdown signals.,"import { createServer } from 'node:http';
+
+const server = createServer(app);
+const connections = new Set<import('node:net').Socket>();
+
+server.on('connection', (conn) => {
+  connections.add(conn);
+  conn.on('close', () => connections.delete(conn));
+});
+
+async function shutdown(signal: string) {
+  console.log(`Received ${signal}. Shutting down gracefully...`);
+  server.close();
+  for (const conn of connections) conn.end();
+  await db.$disconnect();
+  process.exit(0);
+}
+
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));
+setTimeout(() => process.exit(1), 10_000).unref();","// No cleanup at all
+const server = createServer(app);
+server.listen(3000);
+// process just dies on SIGTERM, dropping connections
+// database connections left open
+// in-flight requests get terminated abruptly",https://nodejs.org/api/process.html#signal-events
+11,Structured Logging (pino),Observability,"logging, pino, structured, json, observability","Use a structured logger like pino that outputs JSON logs, making them parseable by log aggregation tools.",Use pino with context-specific child loggers that include relevant metadata like request ID and user ID.,Do not use console.log in production or log unstructured string messages that are hard to parse.,"import pino from 'pino';
+
+const logger = pino({
+  level: process.env.LOG_LEVEL ?? 'info',
+  transport: process.env.NODE_ENV === 'development'
+    ? { target: 'pino-pretty' }
+    : undefined,
+});
+
+// Child logger with context
+const reqLogger = logger.child({ requestId: req.id, userId: user.id });
+reqLogger.info({ path: req.url, method: req.method }, 'incoming request');
+reqLogger.error({ err }, 'failed to process request');","// Unstructured logging
+console.log('Request received: ' + req.url);
+console.log('User: ' + user.id);
+console.error('Error: ' + err.message);
+// Not parseable, no context, no levels, no correlation",https://getpino.io/
+12,Early Return Pattern,Control Flow,"early return, guard clause, nesting, readability","Use early returns (guard clauses) to handle edge cases and error conditions first, reducing nesting and improving readability.",Check for invalid or edge-case conditions at the top of a function and return early.,Do not nest the main logic inside multiple if/else blocks.,"function processOrder(order: Order | null): Result {
+  if (!order) {
+    return { error: 'Order not found' };
+  }
+  if (order.status === 'cancelled') {
+    return { error: 'Order is cancelled' };
+  }
+  if (order.items.length === 0) {
+    return { error: 'Order has no items' };
+  }
+
+  const total = calculateTotal(order.items);
+  return { success: true, total };
+}","function processOrder(order: Order | null): Result {
+  if (order) {
+    if (order.status !== 'cancelled') {
+      if (order.items.length > 0) {
+        const total = calculateTotal(order.items);
+        return { success: true, total };
+      } else {
+        return { error: 'Order has no items' };
+      }
+    } else {
+      return { error: 'Order is cancelled' };
+    }
+  } else {
+    return { error: 'Order not found' };
+  }
+}",https://refactoring.guru/replace-nested-conditional-with-guard-clauses
+13,Destructuring Best Practices,Syntax,"destructuring, object, array, parameters, clean","Use destructuring to extract values from objects and arrays concisely. Apply it to function parameters for clearer APIs.",Destructure function parameters and use meaningful variable names. Provide defaults in destructuring patterns.,Do not over-destructure deeply nested objects in a single statement or destructure more than needed.,"// Function parameter destructuring with defaults
+function createUser({
+  name,
+  email,
+  role = 'viewer',
+}: {
+  name: string;
+  email: string;
+  role?: string;
+}) {
+  return { name, email, role };
+}
+
+// Array destructuring
+const [first, , third] = items;
+
+// Rename during destructuring
+const { name: userName, age: userAge } = user;","// No destructuring -- repetitive property access
+function createUser(options: CreateUserOptions) {
+  const name = options.name;
+  const email = options.email;
+  const role = options.role || 'viewer';
+  return { name, email, role };
+}
+
+// Over-destructuring
+const { data: { users: { edges: [{ node: { profile: { name } } }] } } } = response;",https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Operators/Destructuring_assignment
+14,Readonly and Immutability,Type Safety,"readonly, immutable, freeze, const, mutation","Mark data that should not be mutated as Readonly<T> or use readonly properties. This documents intent and lets TypeScript enforce immutability.",Use Readonly<T> for function parameters that should not be mutated and readonly on class properties.,Do not mutate objects that are passed to your function unless the function's purpose is mutation.,"function processItems(items: readonly string[]): number {
+  // items.push('x'); // Compile error -- enforced!
+  return items.length;
+}
+
+interface Config {
+  readonly host: string;
+  readonly port: number;
+}
+
+type DeepReadonly<T> = {
+  readonly [K in keyof T]: T[K] extends object ? DeepReadonly<T[K]> : T[K];
+};
+
+function getConfig(): Readonly<Config> {
+  return { host: 'localhost', port: 3000 };
+}","function processItems(items: string[]): number {
+  items.sort(); // Mutates the original array!
+  items.push('extra'); // Caller does not expect this
+  return items.length;
+}
+
+interface Config {
+  host: string;
+  port: number;
+}
+
+// Nothing prevents accidental mutation
+const config = getConfig();
+config.port = 9999; // No error, silently changes config",https://www.typescriptlang.org/docs/handbook/2/objects.html#readonly-properties
+15,Enum Alternatives (as-const objects),Type Safety,"enum, const, object, union, alternative","Prefer as-const objects or string literal unions over TypeScript enums. They are more predictable and produce less runtime code.",Use as const objects for groups of related constants and derive union types from them.,Do not use TypeScript enums unless you specifically need reverse mapping or are in an established enum-heavy codebase.,"const Status = {
+  Active: 'active',
+  Inactive: 'inactive',
+  Pending: 'pending',
+} as const;
+
+type Status = (typeof Status)[keyof typeof Status];
+// 'active' | 'inactive' | 'pending'
+
+function setStatus(status: Status) {
+  // status is 'active' | 'inactive' | 'pending'
+}
+
+setStatus(Status.Active);
+setStatus('active'); // also works","enum Status {
+  Active = 'active',
+  Inactive = 'inactive',
+  Pending = 'pending',
+}
+
+// Generates extra runtime code
+// Cannot use string literals directly
+// setStatus('active'); // Error with enums
+// Tree-shaking issues with numeric enums
+enum Direction {
+  Up,    // 0
+  Down,  // 1
+  Left,  // 2
+  Right, // 3
+}",https://www.typescriptlang.org/docs/handbook/enums.html#objects-vs-enums
+16,Dependency Injection without Frameworks,Architecture,"dependency injection, DI, testing, decoupling, composition","Use constructor injection or factory functions to inject dependencies, making code testable and decoupled without needing a DI framework.",Pass dependencies as constructor or function parameters. Create factory functions that wire everything together.,Do not import and use dependencies directly in modules if it makes them hard to test or swap.,"// user.service.ts
+interface UserRepository {
+  findById(id: string): Promise<User | null>;
+}
+
+export function createUserService(repo: UserRepository) {
+  return {
+    async getUser(id: string) {
+      const user = await repo.findById(id);
+      if (!user) throw new Error('User not found');
+      return user;
+    },
+  };
+}
+
+// composition root
+import { createUserService } from './user.service';
+import { PrismaUserRepo } from './user.repo';
+
+const userService = createUserService(new PrismaUserRepo(prisma));","// user.service.ts
+import { prisma } from './db'; // hard-coded dependency
+
+export async function getUser(id: string) {
+  const user = await prisma.user.findUnique({ where: { id } });
+  if (!user) throw new Error('User not found');
+  return user;
+}
+// Cannot test without real database
+// Cannot swap implementation",https://martinfowler.com/articles/injection.html
+17,Configuration via Environment,Configuration,"config, environment, twelve-factor, env, settings","Centralize configuration by reading from environment variables and exporting a single typed config object. Follow the twelve-factor app methodology.",Create a single config module that reads and validates all environment variables and exports a typed object.,Do not scatter process.env access throughout business logic or hardcode configuration values.,"// config.ts
+import { z } from 'zod';
+
+const schema = z.object({
+  port: z.coerce.number().default(3000),
+  databaseUrl: z.string().url(),
+  redisUrl: z.string().url().optional(),
+  logLevel: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
+});
+
+export type Config = z.infer<typeof schema>;
+
+export const config: Config = schema.parse({
+  port: process.env.PORT,
+  databaseUrl: process.env.DATABASE_URL,
+  redisUrl: process.env.REDIS_URL,
+  logLevel: process.env.LOG_LEVEL,
+});","// Scattered config access
+// handler.ts
+const limit = parseInt(process.env.RATE_LIMIT || '100');
+
+// service.ts
+const apiKey = process.env.API_KEY!; // might be undefined
+
+// db.ts
+const url = process.env.DB_URL ?? 'postgres://localhost/dev'; // hardcoded fallback",https://12factor.net/config
+18,Path Aliases (tsconfig paths),Configuration,"paths, alias, tsconfig, import, module","Configure path aliases in tsconfig.json to avoid long relative import paths and make project structure changes easier.",Set up path aliases for major directories like src and use them consistently across the project.,Do not create too many aliases or use them inconsistently alongside relative imports.,"// tsconfig.json
+{
+  ""compilerOptions"": {
+    ""baseUrl"": ""."",
+    ""paths"": {
+      ""@/*"": [""src/*""],
+      ""@/lib/*"": [""src/lib/*""],
+      ""@/types/*"": [""src/types/*""]
+    }
+  }
+}
+
+// Usage in code
+import { UserService } from '@/services/user.service';
+import { Config } from '@/types/config';
+import { logger } from '@/lib/logger';","// Deep relative imports that break on refactor
+import { UserService } from '../../../../services/user.service';
+import { Config } from '../../../types/config';
+import { logger } from '../../lib/logger';
+// Every file move breaks these imports",https://www.typescriptlang.org/tsconfig#paths
+19,Naming Conventions,Style,"naming, convention, files, variables, types, style","Follow consistent naming conventions: camelCase for variables/functions, PascalCase for types/classes, kebab-case for files.",Use camelCase for variables and functions. Use PascalCase for types and classes. Use kebab-case for file names.,Do not mix naming styles or use abbreviations that reduce readability.,"// File: user-service.ts (kebab-case)
+// Type: PascalCase
+interface UserProfile {
+  firstName: string;
+  lastName: string;
+}
+
+// Variable/function: camelCase
+const maxRetryCount = 3;
+
+function getUserProfile(userId: string): UserProfile {
+  // ...
+  return { firstName: 'Jane', lastName: 'Doe' };
+}
+
+// Constants: SCREAMING_SNAKE_CASE
+const MAX_CONNECTIONS = 10;
+const API_BASE_URL = 'https://api.example.com';","// File: UserService.ts or user_service.ts (inconsistent)
+// Mixed naming styles
+interface user_profile {
+  FirstName: string;
+  last_name: string;
+}
+
+const MaxRetryCount = 3; // PascalCase for variable
+function GetUserProfile(user_id: string) { // PascalCase function, snake_case param
+  return { FirstName: 'Jane', last_name: 'Doe' };
+}
+
+const max_connections = 10; // snake_case constant",https://typescript-eslint.io/rules/naming-convention/
+20,Type-Only Imports (import type),Modules,"import type, type-only, erasure, bundle, optimization","Use import type for imports that are only used in type positions. This makes intent clear and can improve bundle size since type imports are fully erased.",Use import type when importing interfaces or types that are not used at runtime.,Do not use regular import for types that are only needed at compile time.,"import type { User, CreateUserDto } from './user.types';
+import type { Request, Response } from 'express';
+
+import { z } from 'zod'; // runtime import -- needed
+
+// Inline type import
+import { createServer, type ServerOptions } from 'node:http';
+
+function handler(req: Request, res: Response): void {
+  const user: User = { id: '1', name: 'Jane' };
+  res.json(user);
+}","import { User, CreateUserDto } from './user.types';
+import { Request, Response } from 'express';
+// These types are only used in type positions
+// but they appear as runtime imports in compiled JS
+// Bundler cannot tell they are type-only
+// May cause issues with circular dependencies",https://www.typescriptlang.org/docs/handbook/release-notes/typescript-3-8.html#type-only-imports-and-export
+21,Using unknown vs any,Type Safety,"unknown, any, type safety, narrowing, catch","Use unknown instead of any when the type is truly not known. unknown forces you to narrow the type before using it, maintaining type safety.",Use unknown for values of uncertain type and narrow with typeof or instanceof before use.,Do not use any as a shortcut to bypass type checking. Reserve any for legacy interop boundaries only.,"function parseInput(input: unknown): string {
+  if (typeof input === 'string') {
+    return input.toUpperCase();
+  }
+  if (typeof input === 'number') {
+    return String(input);
+  }
+  throw new Error(`Unexpected input type: ${typeof input}`);
+}
+
+// Error handling with unknown
+try {
+  await riskyOperation();
+} catch (err: unknown) {
+  if (err instanceof Error) {
+    logger.error({ message: err.message, stack: err.stack });
+  } else {
+    logger.error({ err }, 'Non-error thrown');
+  }
+}","function parseInput(input: any): string {
+  return input.toUpperCase(); // Runtime crash if not string
+}
+
+// No type narrowing
+try {
+  await riskyOperation();
+} catch (err: any) {
+  console.log(err.message); // might crash if err is not Error
+  console.log(err.code);    // no type safety at all
+}",https://www.typescriptlang.org/docs/handbook/2/functions.html#unknown
+22,Narrowing with typeof/instanceof,Type Safety,"narrowing, typeof, instanceof, type guard, discriminated","Use typeof, instanceof, and discriminated unions to narrow types in conditional branches. TypeScript narrows the type automatically in each branch.",Use typeof for primitives and instanceof for class instances. Use discriminated unions for complex type narrowing.,Do not use type assertions (as Type) to bypass narrowing. Write proper type guards instead.,"// typeof narrowing
+function format(value: string | number): string {
+  if (typeof value === 'string') {
+    return value.trim(); // string methods available
+  }
+  return value.toFixed(2); // number methods available
+}
+
+// Discriminated union
+type Result =
+  | { kind: 'success'; data: string }
+  | { kind: 'error'; message: string };
+
+function handle(result: Result) {
+  switch (result.kind) {
+    case 'success':
+      console.log(result.data); // TypeScript knows data exists
+      break;
+    case 'error':
+      console.error(result.message); // TypeScript knows message exists
+      break;
+  }
+}","function format(value: string | number): string {
+  // Using type assertion instead of narrowing
+  return (value as string).trim(); // crashes if number
+}
+
+type Result = { data?: string; message?: string; kind: string };
+
+function handle(result: Result) {
+  // No narrowing, everything is optional
+  if (result.data) {
+    console.log(result.data);
+  }
+  if (result.message) {
+    console.error(result.message);
+  }
+  // Cannot tell success from error reliably
+}",https://www.typescriptlang.org/docs/handbook/2/narrowing.html
+23,Symbol for Unique Keys,Advanced,"symbol, unique, key, property, metadata","Use Symbol to create unique property keys that cannot clash with other properties. Useful for metadata, internal state, or framework-level properties.",Use Symbol for framework-internal keys or metadata that must not collide with user-defined properties.,Do not use string keys for internal metadata that could conflict with user data.,"const VALIDATION_KEY = Symbol('validation');
+const METADATA_KEY = Symbol('metadata');
+
+interface Validatable {
+  [VALIDATION_KEY]: {
+    rules: string[];
+    validated: boolean;
+  };
+}
+
+function markValidated<T extends object>(obj: T): T & Validatable {
+  return Object.assign(obj, {
+    [VALIDATION_KEY]: { rules: ['required'], validated: true },
+  });
+}
+
+const user = markValidated({ name: 'Jane' });
+console.log(user[VALIDATION_KEY].validated); // true
+// VALIDATION_KEY never collides with any string property","const VALIDATION_KEY = '__validation__';
+
+interface Validatable {
+  __validation__: {
+    rules: string[];
+    validated: boolean;
+  };
+}
+
+function markValidated(obj: any) {
+  obj.__validation__ = { rules: ['required'], validated: true };
+  return obj;
+}
+
+// Can collide with user data
+const user = { name: 'Jane', __validation__: 'oops' };
+markValidated(user); // silently overwrites user data",https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Symbol
+24,Module Scoping (avoiding globals),Architecture,"module, scope, global, encapsulation, state","Keep state encapsulated within modules rather than using global variables. Each module should manage its own state and expose it through explicit exports.",Encapsulate state within modules and expose controlled access through exported functions or classes.,Do not attach properties to globalThis or use global variables for application state.,"// state.ts -- module-scoped state
+let requestCount = 0;
+
+export function incrementRequestCount(): void {
+  requestCount++;
+}
+
+export function getRequestCount(): number {
+  return requestCount;
+}
+
+// cache.ts -- encapsulated module state
+const cache = new Map<string, unknown>();
+
+export function get<T>(key: string): T | undefined {
+  return cache.get(key) as T | undefined;
+}
+
+export function set(key: string, value: unknown): void {
+  cache.set(key, value);
+}","// Using global variables
+(globalThis as any).requestCount = 0;
+(globalThis as any).cache = {};
+
+// In some other file
+(globalThis as any).requestCount++;
+(globalThis as any).cache['users'] = data;
+
+// No encapsulation, no type safety
+// Any file can modify or overwrite
+// Impossible to track who changes state",https://nodejs.org/api/modules.html#the-module-scope
+25,Async IIFE for Scripts,Patterns,"async, iife, top-level, script, entrypoint","Use an async Immediately Invoked Function Expression (IIFE) to use await at the top level in scripts where top-level await is not available.",Wrap script logic in an async IIFE with proper error handling at the boundary.,Do not use .then().catch() chains at the top level or ignore errors from async entry points.,"// seed.ts
+(async () => {
+  try {
+    const db = await connectDatabase();
+    await db.migrate();
+    console.log('Migration complete');
+
+    const users = await loadFixtures('./fixtures/users.json');
+    await db.user.createMany({ data: users });
+    console.log(`Seeded ${users.length} users`);
+
+    await db.$disconnect();
+    process.exit(0);
+  } catch (err) {
+    console.error('Seed failed:', err);
+    process.exit(1);
+  }
+})();","// No error handling
+connectDatabase().then(db => {
+  return db.migrate();
+}).then(() => {
+  console.log('done');
+});
+// Unhandled promise rejection if anything fails
+
+// Or worse: fire and forget
+connectDatabase();
+// Script exits before async work completes",https://developer.mozilla.org/en-US/docs/Glossary/IIFE

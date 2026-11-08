@@ -1,0 +1,1411 @@
+No,Pattern Name,Keywords,Description,Do,Dont,Code Good,Code Bad,Severity,Docs URL
+1,Promise.all,"parallel execution, concurrent promises, batch async, all must succeed","Executes multiple promises in parallel and resolves when ALL promises fulfill. Rejects immediately if any single promise rejects, short-circuiting the rest.","Use Promise.all when you need all results and any failure should abort the operation. Destructure results for clarity. Always attach a .catch or wrap in try/catch.","Don't use Promise.all when partial failures are acceptable. Don't fire unbounded arrays of promises without concurrency control, as this can exhaust memory or connections.","const fetchUserData = async (userIds: string[]): Promise<User[]> => {
+  try {
+    const users: User[] = await Promise.all(
+      userIds.map((id) => fetchUser(id))
+    );
+    return users;
+  } catch (error) {
+    console.error(""One or more fetches failed:"", error);
+    throw error;
+  }
+};
+
+const [profile, settings, notifications] = await Promise.all([
+  getProfile(userId),
+  getSettings(userId),
+  getNotifications(userId),
+]);","const fetchUserData = async (userIds: string[]) => {
+  // BAD: sequential execution loses parallelism
+  const users = [];
+  for (const id of userIds) {
+    const user = await fetchUser(id);
+    users.push(user);
+  }
+  return users;
+};
+
+// BAD: no error handling on Promise.all
+const results = Promise.all([getProfile(id), getSettings(id)]);
+// If one rejects, unhandled promise rejection crashes the process",error,https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Promise/all
+2,Promise.allSettled,"parallel execution, fault-tolerant, partial failure, settled promises","Executes multiple promises in parallel and waits for ALL of them to settle (fulfill or reject). Never short-circuits. Returns an array of objects with status 'fulfilled' or 'rejected'.","Use Promise.allSettled when you want results from all promises regardless of individual failures. Check the status field of each result to handle successes and failures separately.","Don't use Promise.allSettled when you need all results to succeed — use Promise.all instead. Don't ignore the rejected results without logging or handling them.","interface FetchResult<T> {
+  status: ""fulfilled"" | ""rejected"";
+  value?: T;
+  reason?: unknown;
+}
+
+const fetchAllUsers = async (ids: string[]): Promise<User[]> => {
+  const results = await Promise.allSettled(
+    ids.map((id) => fetchUser(id))
+  );
+
+  const users: User[] = [];
+  for (const result of results) {
+    if (result.status === ""fulfilled"") {
+      users.push(result.value);
+    } else {
+      console.warn(""Failed to fetch user:"", result.reason);
+    }
+  }
+  return users;
+};","const fetchAllUsers = async (ids: string[]) => {
+  // BAD: using Promise.all when partial results are acceptable
+  // One failure kills everything
+  try {
+    return await Promise.all(ids.map((id) => fetchUser(id)));
+  } catch {
+    return []; // Lost all successful results
+  }
+};
+
+// BAD: not checking status of allSettled results
+const results = await Promise.allSettled(promises);
+const values = results.map((r: any) => r.value); // undefined for rejected!",warning,https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Promise/allSettled
+3,Promise.race,"first to settle, timeout pattern, racing promises, deadline","Returns a promise that settles as soon as the FIRST promise in the iterable settles (fulfills or rejects). Commonly used to implement timeouts by racing an operation against a timer.","Use Promise.race for timeout patterns — race your async operation against a setTimeout promise. Clean up losing promises (clear timers, abort requests) to prevent leaks.","Don't use Promise.race for selecting the first successful result — use Promise.any instead. Don't forget to clean up the timer or abort the losing operation, which causes resource leaks.","const withTimeout = async <T>(
+  promise: Promise<T>,
+  ms: number
+): Promise<T> => {
+  const controller = new AbortController();
+  const timeout = new Promise<never>((_, reject) => {
+    const timer = setTimeout(() => {
+      controller.abort();
+      reject(new Error(`Operation timed out after ${ms}ms`));
+    }, ms);
+    // Clean up timer if promise resolves first
+    promise.finally(() => clearTimeout(timer));
+  });
+
+  return Promise.race([promise, timeout]);
+};
+
+const data = await withTimeout(fetch(url, { signal: controller.signal }), 5000);","// BAD: timeout timer leaks when promise resolves first
+const withTimeout = async (promise: Promise<any>, ms: number) => {
+  const timeout = new Promise((_, reject) => {
+    setTimeout(() => reject(new Error(""Timeout"")), ms);
+    // Timer keeps running even after promise resolves!
+  });
+  return Promise.race([promise, timeout]);
+};
+
+// BAD: using race to get first success (rejects if fastest rejects)
+const fastest = await Promise.race([
+  fetchFromSlowServer(),
+  fetchFromFlakyServer(), // If this rejects first, we lose
+]);",error,https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Promise/race
+4,Promise.any,"first success, AggregateError, redundant requests, fastest success","Returns the first promise that FULFILLS, ignoring rejections. Only rejects if ALL promises reject, throwing an AggregateError containing all rejection reasons.","Use Promise.any for redundant requests where you want the first success (e.g., querying multiple mirrors). Handle AggregateError to report all failures when every promise rejects.","Don't use Promise.any when you need the first settled (including rejected) — use Promise.race. Don't ignore the AggregateError; it contains valuable debugging information about all failures.","const fetchFromFastestMirror = async (url: string): Promise<Response> => {
+  const mirrors = [
+    `https://mirror1.example.com${url}`,
+    `https://mirror2.example.com${url}`,
+    `https://mirror3.example.com${url}`,
+  ];
+
+  try {
+    const response = await Promise.any(
+      mirrors.map((mirror) => fetch(mirror))
+    );
+    return response;
+  } catch (error) {
+    if (error instanceof AggregateError) {
+      console.error(""All mirrors failed:"");
+      error.errors.forEach((e, i) =>
+        console.error(`  Mirror ${i + 1}: ${e.message}`)
+      );
+    }
+    throw error;
+  }
+};","// BAD: using Promise.race instead — a fast rejection kills the attempt
+const fetchFromFastestMirror = async (url: string) => {
+  const mirrors = [""https://m1.example.com"", ""https://m2.example.com""];
+  // If m1 rejects quickly, we never get m2's success
+  return Promise.race(mirrors.map((m) => fetch(m + url)));
+};
+
+// BAD: catching AggregateError but discarding details
+try {
+  await Promise.any(promises);
+} catch (e) {
+  throw new Error(""All failed""); // Lost individual error details
+}",warning,https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Promise/any
+5,async/await Error Handling,"try/catch, error boundaries, async errors, typed errors","Proper error handling in async/await code using try/catch blocks. Ensures errors are caught, typed, logged, and re-thrown or handled gracefully instead of causing unhandled promise rejections.","Wrap await calls in try/catch. Use typed error checking with instanceof. Always re-throw or handle errors explicitly. Add finally blocks for cleanup. Use custom error classes for domain errors.","Don't use bare catch without handling or re-throwing. Don't catch errors and silently swallow them. Don't mix .then/.catch with async/await in the same function — pick one style.","class ApiError extends Error {
+  constructor(
+    message: string,
+    public statusCode: number,
+    public cause?: Error
+  ) {
+    super(message);
+    this.name = ""ApiError"";
+  }
+}
+
+const getUser = async (id: string): Promise<User> => {
+  try {
+    const response = await fetch(`/api/users/${id}`);
+    if (!response.ok) {
+      throw new ApiError(
+        `Failed to fetch user ${id}`,
+        response.status
+      );
+    }
+    return await response.json();
+  } catch (error) {
+    if (error instanceof ApiError) {
+      console.error(`API Error [${error.statusCode}]: ${error.message}`);
+    } else if (error instanceof TypeError) {
+      console.error(""Network error:"", error.message);
+    }
+    throw error; // Re-throw after logging
+  } finally {
+    performance.mark(""getUser-end"");
+  }
+};","// BAD: swallowing errors silently
+const getUser = async (id: string) => {
+  try {
+    return await fetch(`/api/users/${id}`);
+  } catch (error) {
+    // Silently swallowed — callers never know it failed
+    return null;
+  }
+};
+
+// BAD: untyped catch, no re-throw, mixing styles
+const getData = async (url: string) => {
+  const result = await fetch(url)
+    .then((r) => r.json())
+    .catch((e) => console.log(e)); // Mixed styles, error swallowed
+  return result;
+};",error,https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/try...catch
+6,Event Loop Understanding,"microtasks, macrotasks, event loop phases, queueMicrotask, execution order","Understanding the Node.js event loop phases and the difference between microtasks (Promise callbacks, queueMicrotask, process.nextTick) and macrotasks (setTimeout, setInterval, setImmediate, I/O).","Understand that microtasks (Promise.then, queueMicrotask) run before macrotasks (setTimeout). Use queueMicrotask for scheduling work that must complete before the next I/O. Keep microtask queues short to avoid starving I/O.","Don't create infinite microtask loops — they block the event loop and starve I/O and timers. Don't assume setTimeout(fn, 0) runs immediately — it runs in the next macrotask. Don't rely on exact timing of event loop phases.","// GOOD: understanding execution order
+const demonstrateEventLoop = (): void => {
+  console.log(""1: synchronous"");
+
+  setTimeout(() => console.log(""5: macrotask (setTimeout)""), 0);
+
+  Promise.resolve().then(() => {
+    console.log(""3: microtask (Promise.then)"");
+  });
+
+  queueMicrotask(() => {
+    console.log(""4: microtask (queueMicrotask)"");
+  });
+
+  process.nextTick(() => {
+    console.log(""2: microtask (nextTick — highest priority)"");
+  });
+
+  console.log(""1.5: synchronous"");
+};
+// Output order: 1, 1.5, 2, 3, 4, 5
+
+// GOOD: using queueMicrotask for post-sync cleanup
+const updateCache = (key: string, value: unknown): void => {
+  cache.set(key, value);
+  queueMicrotask(() => persistCache(cache));
+};","// BAD: infinite microtask loop starves the event loop
+const processQueue = (): void => {
+  queueMicrotask(() => {
+    doWork();
+    processQueue(); // Never yields to I/O or timers!
+  });
+};
+
+// BAD: assuming setTimeout(fn, 0) is immediate
+const broken = async () => {
+  let value = 0;
+  setTimeout(() => { value = 1; }, 0);
+  // value is still 0 here — setTimeout is a macrotask
+  console.log(value); // Prints 0, not 1
+};",warning,https://nodejs.org/en/learn/asynchronous-work/event-loop-timers-and-nexttick
+7,Readable Streams,"stream consumption, async iteration, data events, flowing mode","Consuming data from readable streams using modern async iteration (for-await-of) or event-based patterns. Readable streams emit data in chunks, enabling processing of large datasets without loading everything into memory.","Use for-await-of to consume readable streams — it handles backpressure automatically. Use stream.Readable.from() to create readable streams from iterables. Set encoding before reading text streams.","Don't call stream.read() in a tight loop — use the 'readable' event or async iteration. Don't concatenate all chunks into a string for large files — process chunks incrementally. Don't forget to handle the 'error' event.","import { createReadStream } from ""fs"";
+import { createInterface } from ""readline"";
+
+// GOOD: async iteration over a readable stream
+const processLargeFile = async (path: string): Promise<number> => {
+  const stream = createReadStream(path, { encoding: ""utf-8"" });
+  let lineCount = 0;
+
+  const rl = createInterface({ input: stream, crlfDelay: Infinity });
+
+  for await (const line of rl) {
+    lineCount++;
+    await processLine(line);
+  }
+
+  return lineCount;
+};
+
+// GOOD: readable stream with proper error handling
+const readStream = async (stream: NodeJS.ReadableStream): Promise<Buffer> => {
+  const chunks: Buffer[] = [];
+  for await (const chunk of stream) {
+    chunks.push(Buffer.from(chunk));
+  }
+  return Buffer.concat(chunks);
+};","// BAD: loading entire file into memory
+import { readFileSync } from ""fs"";
+
+const processLargeFile = (path: string) => {
+  const content = readFileSync(path, ""utf-8""); // OOM on large files
+  const lines = content.split(""\n"");
+  lines.forEach((line) => processLine(line));
+};
+
+// BAD: no error handler on stream
+const stream = createReadStream(""/path/to/file"");
+stream.on(""data"", (chunk) => {
+  console.log(chunk);
+});
+// Missing: stream.on(""error"", ...) — unhandled errors crash process",error,https://nodejs.org/api/stream.html#readable-streams
+8,Writable Streams,"stream writing, drain event, backpressure, write buffer","Writing data to writable streams while respecting backpressure. The write() method returns false when the internal buffer is full, signaling you should wait for the 'drain' event before writing more.","Always check the return value of stream.write(). Wait for the 'drain' event when write() returns false. Use stream.end() to signal completion. Handle 'error' and 'finish' events.","Don't ignore the return value of write() — it causes unbounded memory growth. Don't call write() after end(). Don't forget to handle the 'error' event on writable streams.","import { createWriteStream, WriteStream } from ""fs"";
+
+const writeData = async (
+  path: string,
+  records: string[]
+): Promise<void> => {
+  const stream: WriteStream = createWriteStream(path, { encoding: ""utf-8"" });
+
+  const write = (data: string): Promise<void> => {
+    return new Promise((resolve, reject) => {
+      const canContinue = stream.write(data);
+      if (canContinue) {
+        resolve();
+      } else {
+        stream.once(""drain"", resolve);
+      }
+      stream.once(""error"", reject);
+    });
+  };
+
+  for (const record of records) {
+    await write(record + ""\n"");
+  }
+
+  await new Promise<void>((resolve) => stream.end(resolve));
+};","import { createWriteStream } from ""fs"";
+
+// BAD: ignoring backpressure
+const writeData = (path: string, records: string[]) => {
+  const stream = createWriteStream(path);
+  for (const record of records) {
+    stream.write(record + ""\n""); // Ignoring return value!
+    // Memory grows unbounded if stream can't keep up
+  }
+  stream.end();
+};
+
+// BAD: writing after end
+const stream = createWriteStream(""output.txt"");
+stream.end(""done"");
+stream.write(""more data""); // Error: write after end",error,https://nodejs.org/api/stream.html#writable-streams
+9,Transform Streams,"data transformation, duplex stream, pipeline stage, chunk processing","Transform streams are duplex streams that modify or transform data as it passes through. They sit between readable and writable streams in a pipeline, processing each chunk via the _transform method.","Use the Transform class or transform option in pipeline for data processing. Implement _transform and optionally _flush for finalization. Use objectMode for non-buffer data.","Don't forget to call callback() or push() in _transform — the stream will hang. Don't assume chunks align with logical boundaries (e.g., JSON lines may be split across chunks). Don't modify the source stream's data without creating a new transform.","import { Transform, TransformCallback } from ""stream"";
+
+// GOOD: custom transform stream with TypeScript
+class JsonParser extends Transform {
+  private buffer: string = """";
+
+  constructor() {
+    super({ objectMode: true, readableObjectMode: true });
+  }
+
+  _transform(
+    chunk: Buffer,
+    encoding: BufferEncoding,
+    callback: TransformCallback
+  ): void {
+    this.buffer += chunk.toString();
+    const lines = this.buffer.split(""\n"");
+    this.buffer = lines.pop() || """";
+
+    for (const line of lines) {
+      if (line.trim()) {
+        try {
+          this.push(JSON.parse(line));
+        } catch (err) {
+          return callback(err as Error);
+        }
+      }
+    }
+    callback();
+  }
+
+  _flush(callback: TransformCallback): void {
+    if (this.buffer.trim()) {
+      try {
+        this.push(JSON.parse(this.buffer));
+      } catch (err) {
+        return callback(err as Error);
+      }
+    }
+    callback();
+  }
+}","import { Transform } from ""stream"";
+
+// BAD: forgetting to call callback — stream hangs forever
+class BrokenTransform extends Transform {
+  _transform(chunk: Buffer, encoding: string, callback: Function) {
+    const data = chunk.toString().toUpperCase();
+    this.push(data);
+    // Missing callback() call! Stream will hang.
+  }
+}
+
+// BAD: assuming chunk boundaries match data boundaries
+class NaiveJsonParser extends Transform {
+  _transform(chunk: Buffer, enc: string, cb: Function) {
+    // Chunk may contain partial JSON — this will throw
+    const obj = JSON.parse(chunk.toString());
+    this.push(obj);
+    cb();
+  }
+}",error,https://nodejs.org/api/stream.html#class-streamtransform
+10,Pipeline (stream.pipeline),"composing streams, pipeline, stream error handling, pipe chain","stream.pipeline() composes multiple streams together and handles error propagation and cleanup automatically. It destroys all streams if any stream in the chain errors, preventing resource leaks.","Use stream.pipeline (or the promisified version) instead of .pipe(). It handles errors, cleanup, and backpressure automatically. Use util.promisify(pipeline) or stream/promises.","Don't chain .pipe() calls without error handling — errors in the middle of a pipe chain are not propagated. Don't forget that .pipe() does not destroy streams on error, causing memory leaks.","import { pipeline } from ""stream/promises"";
+import { createReadStream, createWriteStream } from ""fs"";
+import { createGzip } from ""zlib"";
+import { Transform } from ""stream"";
+
+// GOOD: pipeline with proper error handling and cleanup
+const compressFile = async (
+  input: string,
+  output: string
+): Promise<void> => {
+  const upperCase = new Transform({
+    transform(chunk: Buffer, encoding, callback) {
+      callback(null, chunk.toString().toUpperCase());
+    },
+  });
+
+  await pipeline(
+    createReadStream(input),
+    upperCase,
+    createGzip(),
+    createWriteStream(output)
+  );
+
+  console.log(""Pipeline completed successfully"");
+};
+
+// GOOD: pipeline with AbortController
+const processWithTimeout = async (src: string, dest: string): Promise<void> => {
+  const ac = new AbortController();
+  setTimeout(() => ac.abort(), 30_000);
+
+  await pipeline(createReadStream(src), createWriteStream(dest), {
+    signal: ac.signal,
+  });
+};","import { createReadStream, createWriteStream } from ""fs"";
+import { createGzip } from ""zlib"";
+
+// BAD: using .pipe() without error handling
+const compressFile = (input: string, output: string) => {
+  createReadStream(input)
+    .pipe(createGzip())
+    .pipe(createWriteStream(output));
+  // If any stream errors:
+  // - previous streams are not destroyed (leak)
+  // - error is silently swallowed
+  // - file handles remain open
+};
+
+// BAD: error handler only on last stream
+createReadStream(""in.txt"")
+  .pipe(transform)
+  .pipe(createWriteStream(""out.txt""))
+  .on(""error"", console.error); // Only catches writeStream errors!",error,https://nodejs.org/api/stream.html#streampipelinesource-transforms-destination-callback
+11,AbortController,"cancellation, abort signal, request cancellation, timeout abort","AbortController provides a standard mechanism to cancel async operations like fetch requests, streams, and custom async work. Pass the AbortSignal to cancellable APIs and call abort() to cancel.","Create one AbortController per cancellable operation scope. Pass signal to fetch, streams, and pipeline. Listen for the 'abort' event for custom cleanup. Use AbortSignal.timeout() for simple timeouts.","Don't reuse an AbortController after calling abort() — create a new one. Don't forget to check signal.aborted before starting work. Don't ignore the AbortError — handle it as a cancellation, not a failure.","// GOOD: AbortController with fetch and cleanup
+const fetchWithCancel = async (
+  url: string,
+  timeoutMs: number
+): Promise<Response> => {
+  const controller = new AbortController();
+  const { signal } = controller;
+
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const response = await fetch(url, { signal });
+    return response;
+  } catch (error) {
+    if (signal.aborted) {
+      throw new Error(`Request to ${url} was cancelled/timed out`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+};
+
+// GOOD: Using AbortSignal.timeout()
+const quickFetch = async (url: string): Promise<Response> => {
+  return fetch(url, { signal: AbortSignal.timeout(5000) });
+};
+
+// GOOD: custom cancellable operation
+const cancellableWork = (signal: AbortSignal): Promise<string> => {
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) {
+      return reject(new DOMException(""Aborted"", ""AbortError""));
+    }
+    const timer = setTimeout(() => resolve(""done""), 5000);
+    signal.addEventListener(""abort"", () => {
+      clearTimeout(timer);
+      reject(new DOMException(""Aborted"", ""AbortError""));
+    });
+  });
+};","// BAD: no way to cancel a long-running fetch
+const fetchData = async (url: string) => {
+  const response = await fetch(url); // No signal — cannot cancel
+  return response.json();
+};
+
+// BAD: reusing an aborted controller
+const controller = new AbortController();
+controller.abort();
+// Controller is now permanently aborted
+const res = await fetch(url, { signal: controller.signal }); // Always aborts!
+
+// BAD: not handling AbortError
+try {
+  await fetch(url, { signal });
+} catch (e) {
+  console.error(""Request failed:"", e); // Logs cancellation as failure
+}",warning,https://developer.mozilla.org/en-US/docs/Web/API/AbortController
+12,Worker Threads,"CPU-intensive, off-main-thread, parallel processing, worker_threads","Worker threads run JavaScript in parallel OS threads, enabling CPU-intensive operations without blocking the main event loop. Communication happens via message passing with structured clone or SharedArrayBuffer.","Use worker threads for CPU-heavy tasks (parsing, compression, crypto). Use workerData for initialization data. Transfer ArrayBuffers instead of copying. Pool workers for reuse.","Don't use worker threads for I/O-bound work — the event loop handles I/O efficiently. Don't share mutable state without SharedArrayBuffer and Atomics. Don't create a new worker per request — use a pool.","import {
+  Worker,
+  isMainThread,
+  parentPort,
+  workerData,
+} from ""worker_threads"";
+
+// GOOD: worker pool for CPU-intensive tasks
+class WorkerPool {
+  private workers: Worker[] = [];
+  private queue: Array<{
+    data: unknown;
+    resolve: (v: unknown) => void;
+    reject: (e: Error) => void;
+  }> = [];
+  private available: Worker[] = [];
+
+  constructor(private workerPath: string, poolSize: number = 4) {
+    for (let i = 0; i < poolSize; i++) {
+      const worker = new Worker(workerPath);
+      this.workers.push(worker);
+      this.available.push(worker);
+    }
+  }
+
+  run<T>(data: unknown): Promise<T> {
+    return new Promise((resolve, reject) => {
+      const worker = this.available.pop();
+      if (worker) {
+        this.execute(worker, data, resolve, reject);
+      } else {
+        this.queue.push({ data, resolve, reject });
+      }
+    });
+  }
+
+  private execute(
+    worker: Worker,
+    data: unknown,
+    resolve: (v: any) => void,
+    reject: (e: Error) => void
+  ): void {
+    const onMessage = (result: unknown) => {
+      worker.off(""error"", onError);
+      this.available.push(worker);
+      this.processQueue();
+      resolve(result);
+    };
+    const onError = (err: Error) => {
+      worker.off(""message"", onMessage);
+      reject(err);
+    };
+    worker.once(""message"", onMessage);
+    worker.once(""error"", onError);
+    worker.postMessage(data);
+  }
+
+  private processQueue(): void {
+    if (this.queue.length > 0 && this.available.length > 0) {
+      const { data, resolve, reject } = this.queue.shift()!;
+      this.execute(this.available.pop()!, data, resolve, reject);
+    }
+  }
+}","import { Worker } from ""worker_threads"";
+
+// BAD: creating a new worker per request
+const handleRequest = async (data: unknown) => {
+  const worker = new Worker(""./processor.js"");
+  return new Promise((resolve) => {
+    worker.on(""message"", resolve);
+    worker.postMessage(data);
+  });
+  // Worker is never terminated — resource leak
+  // Startup cost per request is huge
+};
+
+// BAD: using workers for I/O
+const worker = new Worker(new URL(""./io-worker.ts"", import.meta.url));
+// Inside worker: just does fetch() calls
+// Wasteful — the event loop handles I/O fine without extra threads",warning,https://nodejs.org/api/worker_threads.html
+13,Cluster Module,"multi-process, multi-core, load balancing, horizontal scaling","The cluster module forks multiple worker processes that share the same server port. The primary process distributes connections to workers, utilizing all CPU cores for handling requests.","Use cluster to scale HTTP servers across CPU cores. Let the primary handle orchestration only. Implement graceful worker restart on crashes. Use sticky sessions if needed for WebSockets.","Don't share in-memory state between workers — use Redis or a database. Don't fork more workers than CPU cores. Don't perform heavy logic in the primary process — it should only manage workers.","import cluster from ""cluster"";
+import { cpus } from ""os"";
+import http from ""http"";
+
+const numCPUs = cpus().length;
+
+if (cluster.isPrimary) {
+  console.log(`Primary ${process.pid} is running`);
+
+  // Fork workers
+  for (let i = 0; i < numCPUs; i++) {
+    cluster.fork();
+  }
+
+  // Graceful restart on worker crash
+  cluster.on(""exit"", (worker, code, signal) => {
+    console.warn(
+      `Worker ${worker.process.pid} died (${signal || code}). Restarting...`
+    );
+    cluster.fork();
+  });
+
+  // Graceful shutdown
+  process.on(""SIGTERM"", () => {
+    console.log(""Primary received SIGTERM"");
+    for (const id in cluster.workers) {
+      cluster.workers[id]?.process.kill(""SIGTERM"");
+    }
+  });
+} else {
+  http
+    .createServer((req, res) => {
+      res.writeHead(200);
+      res.end(`Handled by worker ${process.pid}\n`);
+    })
+    .listen(8000);
+
+  console.log(`Worker ${process.pid} started`);
+}","import cluster from ""cluster"";
+import http from ""http"";
+
+// BAD: sharing in-memory state between workers
+const sessions = new Map(); // Each worker has its own copy!
+
+if (cluster.isPrimary) {
+  cluster.fork();
+  cluster.fork();
+} else {
+  http.createServer((req, res) => {
+    // This Map is NOT shared — sessions are lost between workers
+    sessions.set(req.headers[""session-id""], { user: ""data"" });
+    res.end(""ok"");
+  }).listen(8000);
+}
+
+// BAD: no restart on worker crash
+if (cluster.isPrimary) {
+  for (let i = 0; i < 4; i++) cluster.fork();
+  // Workers that crash are never replaced
+}",warning,https://nodejs.org/api/cluster.html
+14,AsyncLocalStorage,"request context, CLS, continuation-local storage, request scoping","AsyncLocalStorage provides a way to store data that is accessible throughout the lifetime of an async operation without passing context through every function call. Ideal for request-scoped logging, tracing, and user context.","Use AsyncLocalStorage.run() to establish context at the request boundary. Access context with getStore(). Use it for request IDs, user context, and distributed tracing. Keep stored data small and immutable.","Don't store large objects in AsyncLocalStorage — it persists across async boundaries. Don't mutate the store object — create new objects instead. Don't use AsyncLocalStorage as a substitute for dependency injection for everything.","import { AsyncLocalStorage } from ""async_hooks"";
+import http from ""http"";
+
+interface RequestContext {
+  requestId: string;
+  userId?: string;
+  startTime: number;
+}
+
+const asyncLocalStorage = new AsyncLocalStorage<RequestContext>();
+
+// GOOD: middleware sets up context
+const server = http.createServer((req, res) => {
+  const context: RequestContext = {
+    requestId: crypto.randomUUID(),
+    startTime: Date.now(),
+  };
+
+  asyncLocalStorage.run(context, () => {
+    handleRequest(req, res);
+  });
+});
+
+// GOOD: logger automatically includes request context
+const logger = {
+  info(message: string, data?: Record<string, unknown>): void {
+    const store = asyncLocalStorage.getStore();
+    console.log(JSON.stringify({
+      level: ""info"",
+      message,
+      requestId: store?.requestId,
+      userId: store?.userId,
+      ...data,
+    }));
+  },
+};
+
+// Any function in the call chain can access context
+const getUser = async (id: string): Promise<User> => {
+  logger.info(""Fetching user"", { targetId: id }); // requestId auto-included
+  return db.users.findById(id);
+};","// BAD: threading context through every function manually
+const handleRequest = (
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  requestId: string, // Must pass everywhere
+  userId: string     // Must pass everywhere
+) => {
+  getUser(userId, requestId); // Every function needs these params
+};
+
+const getUser = (userId: string, requestId: string) => {
+  logger.info(""Fetching user"", { requestId }); // Manual threading
+  return db.users.findById(userId);
+};
+
+// BAD: mutating the store
+asyncLocalStorage.run({ count: 0 }, async () => {
+  const store = asyncLocalStorage.getStore()!;
+  store.count++; // Mutation — can cause subtle bugs in concurrent requests
+});",warning,https://nodejs.org/api/async_context.html#class-asynclocalstorage
+15,EventEmitter Patterns,"typed events, event-driven, pub/sub, observer pattern","EventEmitter enables a typed publish/subscribe pattern in Node.js. Using TypeScript, you can define strict event maps for type-safe event emission and handling, preventing typos and incorrect payloads.","Define a typed event map interface. Extend EventEmitter with generic types. Use once() for one-time events. Remove listeners to prevent memory leaks. Set maxListeners when needed.","Don't forget to remove event listeners — it causes memory leaks. Don't use string literals for event names without a type map. Don't emit errors without a listener — it throws and crashes. Don't exceed the default 10 listener limit without reason.","import { EventEmitter } from ""events"";
+
+// GOOD: typed event emitter
+interface ServerEvents {
+  connection: [socket: { id: string; ip: string }];
+  error: [error: Error];
+  close: [];
+  request: [method: string, path: string];
+}
+
+class TypedEmitter<T extends Record<string, unknown[]>> {
+  private emitter = new EventEmitter();
+
+  on<K extends keyof T & string>(
+    event: K,
+    listener: (...args: T[K]) => void
+  ): this {
+    this.emitter.on(event, listener as any);
+    return this;
+  }
+
+  emit<K extends keyof T & string>(event: K, ...args: T[K]): boolean {
+    return this.emitter.emit(event, ...args);
+  }
+
+  off<K extends keyof T & string>(
+    event: K,
+    listener: (...args: T[K]) => void
+  ): this {
+    this.emitter.off(event, listener as any);
+    return this;
+  }
+
+  once<K extends keyof T & string>(
+    event: K,
+    listener: (...args: T[K]) => void
+  ): this {
+    this.emitter.once(event, listener as any);
+    return this;
+  }
+}
+
+const server = new TypedEmitter<ServerEvents>();
+server.on(""connection"", (socket) => {
+  console.log(`Connected: ${socket.id} from ${socket.ip}`);
+});","import { EventEmitter } from ""events"";
+
+// BAD: untyped event emitter with string literals
+const server = new EventEmitter();
+
+server.on(""conection"", (socket) => { // Typo: 'conection' — never fires
+  console.log(socket.id);
+});
+
+server.emit(""connection"", { id: ""1"" }); // Listener missed due to typo
+
+// BAD: memory leak from never removing listeners
+const setupPolling = (emitter: EventEmitter) => {
+  setInterval(() => {
+    // Adds a new listener every interval — memory leak!
+    emitter.on(""data"", (d) => process(d));
+  }, 1000);
+};
+
+// BAD: emitting error without listener crashes
+const emitter = new EventEmitter();
+emitter.emit(""error"", new Error(""boom"")); // Throws — no error listener!",error,https://nodejs.org/api/events.html
+16,Queue Processing (BullMQ),"background jobs, job queue, Redis queue, worker processing","BullMQ provides reliable Redis-backed job queues for background processing. Jobs survive process restarts, support retries, delays, rate limiting, priorities, and concurrency control.","Define typed job data interfaces. Set appropriate retry strategies with exponential backoff. Use separate workers for different queue concerns. Implement failed job handlers. Use concurrency limits.","Don't process long-running CPU tasks in the queue worker's main thread — use sandboxed processors or worker threads. Don't forget to handle failed jobs. Don't set unlimited concurrency — it overwhelms downstream services.","import { Queue, Worker, Job } from ""bullmq"";
+import IORedis from ""ioredis"";
+
+// GOOD: typed queue with proper configuration
+interface EmailJobData {
+  to: string;
+  subject: string;
+  body: string;
+  templateId?: string;
+}
+
+interface EmailJobResult {
+  messageId: string;
+  sentAt: Date;
+}
+
+const connection = new IORedis({ maxRetriesPerRequest: null });
+
+const emailQueue = new Queue<EmailJobData>(""email"", {
+  connection,
+  defaultJobOptions: {
+    attempts: 3,
+    backoff: { type: ""exponential"", delay: 1000 },
+    removeOnComplete: { count: 1000 },
+    removeOnFail: { count: 5000 },
+  },
+});
+
+// GOOD: worker with concurrency and error handling
+const worker = new Worker<EmailJobData, EmailJobResult>(
+  ""email"",
+  async (job: Job<EmailJobData, EmailJobResult>) => {
+    const { to, subject, body } = job.data;
+    await job.updateProgress(10);
+
+    const result = await sendEmail({ to, subject, body });
+    await job.updateProgress(100);
+
+    return { messageId: result.id, sentAt: new Date() };
+  },
+  {
+    connection,
+    concurrency: 5,
+    limiter: { max: 100, duration: 60_000 },
+  }
+);
+
+worker.on(""failed"", (job, err) => {
+  console.error(`Job ${job?.id} failed: ${err.message}`);
+});
+
+// Adding a job
+await emailQueue.add(""welcome"", {
+  to: ""user@example.com"",
+  subject: ""Welcome!"",
+  body: ""Hello!"",
+});","// BAD: processing jobs without retry or error handling
+import { Queue, Worker } from ""bullmq"";
+
+const queue = new Queue(""tasks"");
+const worker = new Worker(""tasks"", async (job) => {
+  await doWork(job.data); // No try/catch, no retries
+  // If this throws, job is lost with no retry
+});
+// No 'failed' event handler — silent failures
+
+// BAD: unbounded concurrency overwhelms resources
+const badWorker = new Worker(
+  ""heavy-tasks"",
+  async (job) => {
+    await cpuIntensiveWork(job.data); // On main thread!
+  },
+  { concurrency: 1000 } // Way too many concurrent jobs
+);
+
+// BAD: no connection error handling
+const q = new Queue(""jobs""); // Default connection — no maxRetriesPerRequest: null",error,https://docs.bullmq.io/
+17,Async Iterators,"for-await-of, async generators, Symbol.asyncIterator, paginated fetching","Async iterators allow consuming asynchronous data sources using for-await-of loops. Async generator functions (async function*) provide an ergonomic way to produce async sequences on demand.","Use async generators for paginated API calls, streaming data, and lazy async sequences. Implement Symbol.asyncIterator for custom async iterable classes. Use for-await-of to consume them.","Don't use .next() manually unless you need fine-grained control — prefer for-await-of. Don't forget to handle errors inside async generators. Don't create infinite async iterators without a break condition.","// GOOD: paginated API fetching with async generator
+async function* fetchPages<T>(
+  baseUrl: string
+): AsyncGenerator<T[], void, undefined> {
+  let page = 1;
+  let hasMore = true;
+
+  while (hasMore) {
+    const response = await fetch(`${baseUrl}?page=${page}&limit=100`);
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+
+    const data: { items: T[]; hasNextPage: boolean } = await response.json();
+    yield data.items;
+    hasMore = data.hasNextPage;
+    page++;
+  }
+}
+
+// Consuming the async generator
+const processAllUsers = async (): Promise<void> => {
+  for await (const batch of fetchPages<User>(""/api/users"")) {
+    for (const user of batch) {
+      await processUser(user);
+    }
+    console.log(`Processed batch of ${batch.length} users`);
+  }
+};
+
+// GOOD: custom async iterable
+class EventStream implements AsyncIterable<Event> {
+  constructor(private source: EventSource) {}
+
+  async *[Symbol.asyncIterator](): AsyncGenerator<Event> {
+    while (true) {
+      const event = await this.source.next();
+      if (event.done) break;
+      yield event.value;
+    }
+  }
+}","// BAD: loading all pages into memory at once
+const fetchAllUsers = async (baseUrl: string): Promise<User[]> => {
+  const allUsers: User[] = [];
+  let page = 1;
+  let hasMore = true;
+
+  while (hasMore) {
+    const res = await fetch(`${baseUrl}?page=${page}`);
+    const data = await res.json();
+    allUsers.push(...data.items); // Unbounded memory growth!
+    hasMore = data.hasNextPage;
+    page++;
+  }
+  return allUsers; // Could be millions of records in memory
+};
+
+// BAD: infinite iterator with no exit
+async function* infinite() {
+  while (true) {
+    yield await fetchData();
+    // No break condition — runs forever
+  }
+}",warning,https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/for-await...of
+18,Top-level await,"ESM, module initialization, async module loading, top-level async","Top-level await allows using await at the module level in ES modules without wrapping in an async function. The module's dependents wait for the async operation to complete before executing.","Use top-level await for module initialization that requires async operations (config loading, DB connection). Keep top-level await operations fast and essential. Handle errors at the module level.","Don't use top-level await for operations that can be lazy-initialized. Don't forget that top-level await blocks importing modules from executing. Don't use it in CommonJS — it only works in ES modules.","// GOOD: config.ts — loading configuration asynchronously at module level
+// (requires ""type"": ""module"" in package.json or .mts extension)
+
+const response = await fetch(process.env.CONFIG_URL!);
+if (!response.ok) {
+  throw new Error(`Failed to load config: ${response.status}`);
+}
+
+export const config: AppConfig = await response.json();
+
+// GOOD: db.ts — database connection at module level
+import { createPool, Pool } from ""mysql2/promise"";
+
+export const pool: Pool = createPool({
+  host: process.env.DB_HOST,
+  user: process.env.DB_USER,
+  password: process.env.DB_PASS,
+  database: process.env.DB_NAME,
+});
+
+// Verify connection at import time
+const connection = await pool.getConnection();
+console.log(""Database connected"");
+connection.release();
+
+// GOOD: feature-flags.ts
+const flags = await loadFeatureFlags();
+export const isFeatureEnabled = (name: string): boolean => {
+  return flags.has(name) && flags.get(name)!.enabled;
+};","// BAD: wrapping everything in an async IIFE (pre-ESM pattern)
+let config: AppConfig;
+(async () => {
+  const res = await fetch(process.env.CONFIG_URL!);
+  config = await res.json();
+})();
+// config is undefined here — race condition!
+export { config }; // Importers get undefined
+
+// BAD: slow operation blocks all dependent modules
+// slow-module.ts
+await new Promise((r) => setTimeout(r, 10000)); // 10s delay
+export const value = 42;
+// Every module that imports this waits 10 seconds!
+
+// BAD: no error handling at top level
+const data = await fetch(""/api/config""); // If this fails, module load crashes
+export default data.json();",warning,https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Operators/await#top_level_await
+19,Promisify,"callback to promise, util.promisify, legacy API wrapping","Converting callback-based Node.js APIs to promise-based ones using util.promisify or manual wrapping. Essential for using legacy APIs with async/await.","Use util.promisify for standard Node.js callback patterns (err, result). Use fs/promises or other built-in promise APIs when available. Write manual wrappers for non-standard callback signatures.","Don't promisify APIs that already have promise versions (use fs/promises, not promisify(fs.readFile)). Don't promisify event-based APIs — they need different handling. Don't forget to bind methods when promisifying class methods.","import { promisify } from ""util"";
+import { exec as execCb } from ""child_process"";
+import { readFile } from ""fs/promises""; // Use built-in promise API
+
+// GOOD: use built-in promise APIs when available
+const content = await readFile(""/path/to/file"", ""utf-8"");
+
+// GOOD: promisify for APIs without promise versions
+const exec = promisify(execCb);
+const { stdout, stderr } = await exec(""ls -la"");
+
+// GOOD: manual promisify for non-standard callbacks
+const connectToDb = (config: DbConfig): Promise<DbConnection> => {
+  return new Promise((resolve, reject) => {
+    const client = new LegacyDbClient(config);
+    client.connect((err: Error | null, conn: DbConnection) => {
+      if (err) {
+        reject(err);
+      } else {
+        resolve(conn);
+      }
+    });
+  });
+};
+
+// GOOD: promisify with custom symbol
+import { promisify } from ""util"";
+class MyClass {
+  doWork(callback: (err: Error | null, result: string) => void): void {
+    callback(null, ""done"");
+  }
+}
+const instance = new MyClass();
+const doWorkAsync = promisify(instance.doWork.bind(instance));
+const result = await doWorkAsync();","// BAD: promisifying what already has a promise API
+import { promisify } from ""util"";
+import { readFile } from ""fs""; // Wrong import!
+const readFileAsync = promisify(readFile); // Unnecessary!
+// Should use: import { readFile } from ""fs/promises"";
+
+// BAD: incorrect manual promisification — missing reject
+const readConfig = (): Promise<Config> => {
+  return new Promise((resolve) => {
+    legacyRead(""config.json"", (err, data) => {
+      resolve(JSON.parse(data)); // If err exists, data is undefined — crash
+      // Missing: if (err) reject(err)
+    });
+  });
+};
+
+// BAD: lost 'this' context
+class Service {
+  prefix = ""svc"";
+  work(cb: (e: Error | null, r: string) => void) { cb(null, this.prefix); }
+}
+const svc = new Service();
+const workAsync = promisify(svc.work); // 'this' is lost!",warning,https://nodejs.org/api/util.html#utilpromisifyoriginal
+20,setTimeout/setInterval,"timers, scheduling, timer cleanup, timer promises","Best practices for using setTimeout and setInterval in Node.js, including proper cleanup, using the timers/promises API, and avoiding common pitfalls with timer references and drift.","Use timers/promises API for async timer usage. Always store timer references and clear them on cleanup. Use AbortController with timer promises. Account for drift in setInterval by recalculating delays.","Don't use setInterval for precise timing — it drifts. Don't forget to clear timers — they hold references and prevent garbage collection. Don't use string arguments for setTimeout. Don't nest setTimeout excessively.","import { setTimeout as delay } from ""timers/promises"";
+
+// GOOD: using timers/promises API with abort support
+const poll = async (
+  fn: () => Promise<boolean>,
+  intervalMs: number,
+  signal: AbortSignal
+): Promise<void> => {
+  while (!signal.aborted) {
+    const done = await fn();
+    if (done) return;
+    await delay(intervalMs, undefined, { signal });
+  }
+};
+
+// GOOD: self-correcting interval to prevent drift
+const accurateInterval = (
+  callback: () => void | Promise<void>,
+  intervalMs: number
+): (() => void) => {
+  let expected = Date.now() + intervalMs;
+  let timer: NodeJS.Timeout;
+
+  const tick = async () => {
+    const drift = Date.now() - expected;
+    await callback();
+    expected += intervalMs;
+    timer = setTimeout(tick, Math.max(0, intervalMs - drift));
+  };
+
+  timer = setTimeout(tick, intervalMs);
+  return () => clearTimeout(timer);
+};
+
+// GOOD: cleanup in a class
+class Scheduler {
+  private timers: Set<NodeJS.Timeout> = new Set();
+
+  schedule(fn: () => void, ms: number): void {
+    const timer = setTimeout(() => {
+      this.timers.delete(timer);
+      fn();
+    }, ms);
+    this.timers.add(timer);
+  }
+
+  destroy(): void {
+    for (const timer of this.timers) clearTimeout(timer);
+    this.timers.clear();
+  }
+}","// BAD: timer reference leak
+const startPolling = () => {
+  setInterval(async () => {
+    await checkForUpdates();
+  }, 5000);
+  // No reference stored — can never be cleared!
+  // Keeps running even after the operation is no longer needed
+};
+
+// BAD: nested setTimeout spaghetti
+setTimeout(() => {
+  doStep1();
+  setTimeout(() => {
+    doStep2();
+    setTimeout(() => {
+      doStep3(); // Callback hell with timers
+    }, 1000);
+  }, 1000);
+}, 1000);
+
+// BAD: setInterval with async — overlapping executions
+setInterval(async () => {
+  await longRunningTask(); // Takes 5s, interval is 1s
+  // Multiple invocations overlap and run concurrently!
+}, 1000);",warning,https://nodejs.org/api/timers.html
+21,process.nextTick vs setImmediate,"microtask priority, event loop phases, nextTick, setImmediate","process.nextTick queues a callback in the microtask queue (runs before any I/O), while setImmediate queues in the check phase (runs after I/O). Understanding their execution order is critical for correct async behavior.","Use setImmediate when you want to yield to the event loop and allow I/O to proceed. Use process.nextTick sparingly for ensuring callbacks run before any I/O. Prefer queueMicrotask over process.nextTick for new code.","Don't use recursive process.nextTick — it starves I/O. Don't assume process.nextTick and setImmediate are interchangeable — they have different priorities. Don't overuse process.nextTick when setImmediate would suffice.","// GOOD: using setImmediate to yield to event loop
+const processLargeArray = (
+  items: unknown[],
+  callback: (results: unknown[]) => void
+): void => {
+  const results: unknown[] = [];
+  let index = 0;
+  const batchSize = 100;
+
+  const processBatch = (): void => {
+    const end = Math.min(index + batchSize, items.length);
+    for (; index < end; index++) {
+      results.push(transform(items[index]));
+    }
+
+    if (index < items.length) {
+      // Yield to event loop — allows I/O to proceed
+      setImmediate(processBatch);
+    } else {
+      callback(results);
+    }
+  };
+
+  processBatch();
+};
+
+// GOOD: process.nextTick for API consistency
+class AsyncResource {
+  load(callback: (err: Error | null, data: string) => void): void {
+    const cached = this.cache.get(this.key);
+    if (cached) {
+      // Ensure callback is always async, even for cached results
+      process.nextTick(callback, null, cached);
+      return;
+    }
+    this.fetchFromDb((err, data) => callback(err, data));
+  }
+}","// BAD: recursive nextTick starves I/O
+const processQueue = (items: unknown[]): void => {
+  if (items.length === 0) return;
+  const item = items.shift()!;
+  processItem(item);
+  process.nextTick(() => processQueue(items)); // Starves I/O!
+  // No I/O events can fire until the entire queue is processed
+};
+
+// BAD: using nextTick when setImmediate is appropriate
+const computeHeavy = (data: unknown[], cb: (r: unknown) => void): void => {
+  const result = heavyComputation(data);
+  // nextTick blocks I/O — should use setImmediate
+  process.nextTick(() => cb(result));
+};
+
+// BAD: assuming same execution order
+setTimeout(() => console.log(""timeout""), 0);
+setImmediate(() => console.log(""immediate""));
+// Order is NON-DETERMINISTIC outside I/O callbacks!",warning,https://nodejs.org/en/learn/asynchronous-work/understanding-setimmediate
+22,Graceful Shutdown,"SIGTERM, SIGINT, cleanup, server close, process exit","Handling process termination signals (SIGTERM, SIGINT) to gracefully close connections, finish in-flight requests, flush buffers, and release resources before the process exits.","Listen for SIGTERM and SIGINT signals. Stop accepting new connections immediately. Wait for in-flight requests to complete with a timeout. Close database pools, flush logs, and release resources. Exit with appropriate code.","Don't call process.exit() immediately — it kills in-flight requests. Don't forget to set a forced shutdown timeout — hung connections can prevent exit. Don't register signal handlers multiple times without cleanup.","import http from ""http"";
+
+const gracefulShutdown = (
+  server: http.Server,
+  cleanup: () => Promise<void>,
+  timeoutMs: number = 30_000
+): void => {
+  let isShuttingDown = false;
+
+  const shutdown = async (signal: string): Promise<void> => {
+    if (isShuttingDown) return;
+    isShuttingDown = true;
+
+    console.log(`Received ${signal}. Starting graceful shutdown...`);
+
+    // Force exit after timeout
+    const forceTimer = setTimeout(() => {
+      console.error(""Forced shutdown: timeout exceeded"");
+      process.exit(1);
+    }, timeoutMs);
+    forceTimer.unref(); // Don't keep process alive just for this timer
+
+    try {
+      // Stop accepting new connections
+      await new Promise<void>((resolve, reject) => {
+        server.close((err) => (err ? reject(err) : resolve()));
+      });
+      console.log(""Server closed — no new connections"");
+
+      // Run cleanup (close DB, flush logs, etc.)
+      await cleanup();
+      console.log(""Cleanup complete"");
+
+      process.exit(0);
+    } catch (error) {
+      console.error(""Error during shutdown:"", error);
+      process.exit(1);
+    }
+  };
+
+  process.on(""SIGTERM"", () => shutdown(""SIGTERM""));
+  process.on(""SIGINT"", () => shutdown(""SIGINT""));
+};
+
+// Usage
+const server = http.createServer(app);
+server.listen(3000);
+
+gracefulShutdown(server, async () => {
+  await db.pool.end();
+  await redis.quit();
+  await logger.flush();
+});","// BAD: immediate exit kills in-flight requests
+process.on(""SIGTERM"", () => {
+  console.log(""Bye!"");
+  process.exit(0); // In-flight requests are dropped immediately!
+});
+
+// BAD: no forced timeout — process may hang forever
+process.on(""SIGTERM"", async () => {
+  await server.close(); // If connections never close, process hangs
+  await db.close(); // Never reached
+});
+
+// BAD: not closing the server — new requests keep arriving
+process.on(""SIGTERM"", async () => {
+  // Server still accepts new requests during cleanup!
+  await db.pool.end();
+  await logger.flush();
+  process.exit(0);
+});",error,https://nodejs.org/api/process.html#signal-events
+23,Async Error Propagation,"error chains, unhandled rejection, async error boundaries, error cause","Understanding how errors propagate through async chains, promise chains, and event emitters. Includes using Error.cause for chaining, and handling unhandled rejections globally.","Use the cause option in Error constructor to chain errors. Set up global unhandledRejection handlers. Create error boundaries at async entry points (HTTP handlers, queue workers). Always await or return promises.","Don't create floating promises (promises without await or .catch). Don't catch and re-throw without adding context. Don't ignore unhandledRejection events in production — they indicate bugs.","// GOOD: error chaining with cause
+class DatabaseError extends Error {
+  constructor(
+    message: string,
+    public query: string,
+    options?: ErrorOptions
+  ) {
+    super(message, options);
+    this.name = ""DatabaseError"";
+  }
+}
+
+const getUserById = async (id: string): Promise<User> => {
+  try {
+    return await db.query(""SELECT * FROM users WHERE id = $1"", [id]);
+  } catch (error) {
+    throw new DatabaseError(
+      `Failed to fetch user ${id}`,
+      ""SELECT * FROM users WHERE id = $1"",
+      { cause: error } // Preserve original error
+    );
+  }
+};
+
+// GOOD: global unhandled rejection handler
+process.on(""unhandledRejection"", (reason: unknown, promise: Promise<unknown>) => {
+  console.error(""Unhandled Rejection:"", reason);
+  // In production: log to error tracking service
+  // Then shut down gracefully
+  process.exit(1);
+});
+
+// GOOD: async error boundary in Express-like handler
+const asyncHandler = (
+  fn: (req: Request, res: Response, next: NextFunction) => Promise<void>
+) => {
+  return (req: Request, res: Response, next: NextFunction): void => {
+    fn(req, res, next).catch(next); // Forward errors to error middleware
+  };
+};
+
+app.get(""/users/:id"", asyncHandler(async (req, res) => {
+  const user = await getUserById(req.params.id);
+  res.json(user);
+}));","// BAD: floating promise — error is silently lost
+const handleEvent = (data: unknown): void => {
+  processAsync(data); // Not awaited! If it rejects, unhandled rejection
+};
+
+// BAD: catch and re-throw without context
+const getUser = async (id: string) => {
+  try {
+    return await db.query(""SELECT * FROM users WHERE id = $1"", [id]);
+  } catch (error) {
+    throw error; // No added context — useless catch block
+  }
+};
+
+// BAD: no unhandledRejection handler in production
+// process just has a warning, but the bug is hidden
+
+// BAD: async Express handler without error boundary
+app.get(""/users/:id"", async (req, res) => {
+  const user = await getUserById(req.params.id);
+  // If getUserById throws, Express cannot catch it — unhandled rejection!
+  res.json(user);
+});",error,https://nodejs.org/api/process.html#event-unhandledrejection
+24,Backpressure in Streams,"slow consumer, highWaterMark, drain event, flow control","Backpressure occurs when a writable stream cannot process data as fast as it receives it. Properly handling backpressure prevents unbounded memory growth by pausing the source when the destination buffer is full.","Respect the boolean return from write(). Pause the readable when writable returns false. Resume on 'drain'. Use pipeline() which handles backpressure automatically. Set appropriate highWaterMark values.","Don't ignore the return value of writable.write(). Don't keep pushing data into a stream that signals backpressure. Don't set highWaterMark too high — it defeats the purpose of backpressure.","import { Readable, Writable, pipeline } from ""stream"";
+import { createReadStream, createWriteStream } from ""fs"";
+
+// GOOD: manual backpressure handling
+const copyWithBackpressure = (
+  source: Readable,
+  destination: Writable
+): Promise<void> => {
+  return new Promise((resolve, reject) => {
+    source.on(""data"", (chunk: Buffer) => {
+      const canContinue = destination.write(chunk);
+      if (!canContinue) {
+        // Destination buffer is full — pause source
+        source.pause();
+        destination.once(""drain"", () => {
+          // Destination is ready — resume source
+          source.resume();
+        });
+      }
+    });
+
+    source.on(""end"", () => {
+      destination.end();
+    });
+
+    source.on(""error"", reject);
+    destination.on(""error"", reject);
+    destination.on(""finish"", resolve);
+  });
+};
+
+// GOOD: pipeline handles backpressure automatically
+import { pipeline as pipelineAsync } from ""stream/promises"";
+
+const safeCopy = async (src: string, dest: string): Promise<void> => {
+  await pipelineAsync(
+    createReadStream(src, { highWaterMark: 64 * 1024 }),
+    createWriteStream(dest, { highWaterMark: 64 * 1024 })
+  );
+};","import { createReadStream, createWriteStream } from ""fs"";
+
+// BAD: ignoring backpressure — unbounded memory growth
+const copyFile = (src: string, dest: string): void => {
+  const readable = createReadStream(src);
+  const writable = createWriteStream(dest);
+
+  readable.on(""data"", (chunk) => {
+    writable.write(chunk); // Return value ignored!
+    // If writable is slow, chunks pile up in memory
+    // Can cause OOM for large files
+  });
+};
+
+// BAD: using pipe without error handling (errors silently dropped)
+createReadStream(""input.dat"")
+  .pipe(createWriteStream(""output.dat""));
+// If either stream errors, the other is NOT destroyed
+// Resource leaks and silent failures
+
+// BAD: highWaterMark set absurdly high
+const stream = createReadStream(""huge.bin"", {
+  highWaterMark: 1024 * 1024 * 1024, // 1GB buffer — defeats backpressure
+});",error,https://nodejs.org/en/learn/modules/backpressuring-in-streams
+25,Debounce/Throttle,"rate-limiting, input debounce, throttle function, async rate control","Debouncing delays execution until a pause in calls; throttling limits execution to at most once per interval. Both prevent overwhelming async operations with too many rapid invocations.","Use debounce for search inputs, resize handlers, and auto-save. Use throttle for scroll handlers, API polling, and rate-limited endpoints. Cancel pending debounced calls on cleanup. Make them async-aware.","Don't debounce time-critical operations. Don't forget to cancel debounced functions on component unmount or cleanup. Don't use overly long debounce delays — it hurts UX. Don't throttle without considering the leading/trailing edge.","// GOOD: async-aware debounce with cancellation
+const debounce = <T extends (...args: any[]) => Promise<any>>(
+  fn: T,
+  delayMs: number
+): {
+  (...args: Parameters<T>): Promise<ReturnType<T>>;
+  cancel: () => void;
+} => {
+  let timer: NodeJS.Timeout | null = null;
+  let pendingReject: ((reason: Error) => void) | null = null;
+
+  const debounced = (...args: Parameters<T>): Promise<ReturnType<T>> => {
+    return new Promise((resolve, reject) => {
+      if (timer) {
+        clearTimeout(timer);
+        pendingReject?.(new Error(""Debounced""));
+      }
+      pendingReject = reject;
+      timer = setTimeout(async () => {
+        timer = null;
+        pendingReject = null;
+        try {
+          resolve(await fn(...args));
+        } catch (err) {
+          reject(err);
+        }
+      }, delayMs);
+    });
+  };
+
+  debounced.cancel = () => {
+    if (timer) {
+      clearTimeout(timer);
+      timer = null;
+      pendingReject?.(new Error(""Cancelled""));
+      pendingReject = null;
+    }
+  };
+
+  return debounced;
+};
+
+// GOOD: throttle with trailing call
+const throttle = <T extends (...args: any[]) => void>(
+  fn: T,
+  intervalMs: number
+): ((...args: Parameters<T>) => void) => {
+  let lastCall = 0;
+  let timer: NodeJS.Timeout | null = null;
+
+  return (...args: Parameters<T>): void => {
+    const now = Date.now();
+    const remaining = intervalMs - (now - lastCall);
+
+    if (remaining <= 0) {
+      if (timer) { clearTimeout(timer); timer = null; }
+      lastCall = now;
+      fn(...args);
+    } else if (!timer) {
+      timer = setTimeout(() => {
+        lastCall = Date.now();
+        timer = null;
+        fn(...args);
+      }, remaining);
+    }
+  };
+};
+
+const debouncedSearch = debounce(searchApi, 300);","// BAD: no debounce — fires API call on every keystroke
+input.addEventListener(""input"", async (e) => {
+  const results = await searchApi(e.target.value);
+  // Fires on EVERY keystroke — overwhelms the API
+  // Responses arrive out of order — stale results displayed
+  renderResults(results);
+});
+
+// BAD: debounce without cancellation — memory leak
+const naiveDebounce = (fn: Function, ms: number) => {
+  let timer: any;
+  return (...args: any[]) => {
+    clearTimeout(timer);
+    timer = setTimeout(() => fn(...args), ms);
+    // No cancel method — timer persists after cleanup
+    // No promise return — caller cannot await result
+  };
+};
+
+// BAD: throttle that drops trailing call
+const badThrottle = (fn: Function, ms: number) => {
+  let blocked = false;
+  return (...args: any[]) => {
+    if (blocked) return; // Last call is silently dropped!
+    blocked = true;
+    fn(...args);
+    setTimeout(() => { blocked = false; }, ms);
+  };
+};",warning,https://css-tricks.com/debouncing-throttling-explained-examples/

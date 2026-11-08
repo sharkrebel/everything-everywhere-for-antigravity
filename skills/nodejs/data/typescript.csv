@@ -1,0 +1,918 @@
+No,Guideline,Category,Keywords,Description,Do,Dont,Code Good,Code Bad,Severity,Docs URL
+1,Strict Mode Configuration,Config,"strict, tsconfig, strictNullChecks, noImplicitAny, strictFunctionTypes","Enabling the strict flag in tsconfig.json activates a family of stricter type-checking options including strictNullChecks, noImplicitAny, strictFunctionTypes, strictBindCallApply, and strictPropertyInitialization. This is the single most impactful setting for catching bugs at compile time.","Always enable ""strict"": true in every new project's tsconfig.json. Enable additional flags like noUncheckedIndexedAccess for even tighter safety. Treat strict mode as the baseline, not an aspiration.","Do not leave strict mode disabled and rely on implicit any types. Do not selectively enable only some strict flags to avoid fixing errors. Do not use // @ts-ignore to silence strict mode violations instead of fixing them.","// tsconfig.json
+{
+  ""compilerOptions"": {
+    ""strict"": true,
+    ""noUncheckedIndexedAccess"": true,
+    ""noImplicitReturns"": true,
+    ""noFallthroughCasesInSwitch"": true,
+    ""exactOptionalPropertyTypes"": true
+  }
+}
+
+// With strict mode, null must be handled
+function getLength(value: string | null): number {
+  if (value === null) return 0;
+  return value.length;
+}","// tsconfig.json with strict OFF (bad)
+{
+  ""compilerOptions"": {
+    ""strict"": false
+  }
+}
+
+// Without strict, null bugs slip through
+function getLength(value: string): number {
+  // value could be null at runtime but TS won't warn
+  return value.length; // runtime crash if null
+}",critical,https://www.typescriptlang.org/tsconfig#strict
+2,Discriminated Unions,Types,"discriminated union, tagged union, pattern matching, literal type, discriminator","A discriminated union is a union of types that share a common literal property (the discriminator). TypeScript uses the discriminator to narrow the union to a specific variant in control flow, enabling exhaustive pattern matching via switch statements or if-else chains.","Use a shared literal property (like kind, type, or status) as the discriminator. Use switch/case with exhaustive checks using the never type. Keep discriminant values as string literal types for readability.","Do not use boolean flags or optional properties to distinguish variants. Do not forget to handle all cases in a switch, leaving potential runtime errors. Do not use type assertions to bypass narrowing.","type Shape =
+  | { kind: ""circle""; radius: number }
+  | { kind: ""rectangle""; width: number; height: number }
+  | { kind: ""triangle""; base: number; height: number };
+
+function area(shape: Shape): number {
+  switch (shape.kind) {
+    case ""circle"":
+      return Math.PI * shape.radius ** 2;
+    case ""rectangle"":
+      return shape.width * shape.height;
+    case ""triangle"":
+      return 0.5 * shape.base * shape.height;
+    default:
+      const _exhaustive: never = shape;
+      return _exhaustive;
+  }
+}","// Bad: using optional fields instead of discriminated union
+type Shape = {
+  kind?: string;
+  radius?: number;
+  width?: number;
+  height?: number;
+  base?: number;
+};
+
+function area(shape: Shape): number {
+  if (shape.radius) {
+    return Math.PI * shape.radius ** 2;
+  }
+  // No compile-time safety, easy to miss cases
+  return (shape.width ?? 0) * (shape.height ?? 0);
+}",critical,https://www.typescriptlang.org/docs/handbook/2/narrowing.html#discriminated-unions
+3,Type Narrowing with Type Guards,Types,"type guard, narrowing, typeof, instanceof, in operator, is predicate, custom guard","Type narrowing is TypeScript's ability to refine a broader type to a more specific one within a code block. Built-in guards include typeof (for primitives), instanceof (for classes), and the in operator (for property checks). Custom type guard functions use the ""is"" predicate return type.","Use typeof for primitive checks, instanceof for class instances, and the in operator for interface discrimination. Write custom type guard functions with the is predicate for complex validation logic. Compose guards for union types.","Do not rely on type assertions (as) when a type guard would work. Do not write type guards that lie about the actual runtime check. Do not use try-catch as a type narrowing mechanism.","interface Fish { swim(): void; name: string }
+interface Bird { fly(): void; name: string }
+
+// Custom type guard with 'is' predicate
+function isFish(pet: Fish | Bird): pet is Fish {
+  return ""swim"" in pet;
+}
+
+function move(pet: Fish | Bird): void {
+  if (isFish(pet)) {
+    pet.swim(); // TS knows pet is Fish here
+  } else {
+    pet.fly();  // TS knows pet is Bird here
+  }
+}
+
+// typeof guard for primitives
+function padLeft(value: string, padding: string | number): string {
+  if (typeof padding === ""number"") {
+    return "" "".repeat(padding) + value;
+  }
+  return padding + value;
+}","// Bad: using type assertions instead of guards
+function move(pet: Fish | Bird): void {
+  // Unsafe: no runtime check, just trust the developer
+  (pet as Fish).swim();
+}
+
+// Bad: type guard that doesn't match runtime check
+function isFish(pet: Fish | Bird): pet is Fish {
+  // Lies: checking name instead of actual structure
+  return pet.name === ""nemo"";
+}",critical,https://www.typescriptlang.org/docs/handbook/2/narrowing.html
+4,Branded/Nominal Types,Types,"branded type, nominal type, unique symbol, opaque type, type safety, newtype","TypeScript uses structural typing, meaning two types with identical shapes are interchangeable. Branded types add a phantom unique symbol property to create nominally distinct types, preventing accidental mixing of semantically different values like UserId vs OrderId, even though both are strings.","Use unique symbol as the brand to ensure compile-time uniqueness. Create constructor functions that validate and brand values. Use this pattern for identifiers, currency amounts, validated strings, and other domain values that should not be mixed.","Do not skip the brand validation function and manually cast values. Do not use plain string or number types for domain identifiers that have different semantics. Do not create brands with regular string properties that could collide.","declare const __brand: unique symbol;
+
+type Brand<T, B extends string> = T & { [__brand]: B };
+
+type UserId = Brand<string, ""UserId"">;
+type OrderId = Brand<string, ""OrderId"">;
+
+function createUserId(id: string): UserId {
+  if (!id.startsWith(""usr_"")) throw new Error(""Invalid user ID"");
+  return id as UserId;
+}
+
+function createOrderId(id: string): OrderId {
+  if (!id.startsWith(""ord_"")) throw new Error(""Invalid order ID"");
+  return id as OrderId;
+}
+
+function getUser(id: UserId): void { /* ... */ }
+
+const userId = createUserId(""usr_123"");
+const orderId = createOrderId(""ord_456"");
+getUser(userId);  // OK
+// getUser(orderId); // Compile error!","// Bad: using plain strings for different ID types
+function getUser(id: string): void { /* ... */ }
+function getOrder(id: string): void { /* ... */ }
+
+const userId = ""usr_123"";
+const orderId = ""ord_456"";
+getUser(orderId); // No error! Wrong ID passed silently
+getOrder(userId); // No error! Bugs at runtime",high,https://www.typescriptlang.org/docs/handbook/2/types-from-types.html
+5,Generic Constraints,Generics,"generics, extends, constraint, keyof, type parameter, bounded generic","Generic constraints use the extends keyword to restrict what types a generic parameter can accept. This enables writing reusable functions and classes that work with a family of types sharing a common shape, while preserving full type safety and autocompletion within the generic body.","Use extends to constrain generics to types with required properties. Use keyof T constraints to safely access object keys. Combine constraints with default type parameters for flexible APIs. Use multiple constraints with intersection types.","Do not leave generics unconstrained when the function body accesses specific properties. Do not use any as a workaround for missing constraints. Do not over-constrain generics making them less reusable than needed.","function getProperty<T, K extends keyof T>(obj: T, key: K): T[K] {
+  return obj[key];
+}
+
+interface HasId { id: string }
+interface HasTimestamps { createdAt: Date; updatedAt: Date }
+
+function updateEntity<T extends HasId & HasTimestamps>(
+  entity: T,
+  updates: Partial<Omit<T, ""id"" | ""createdAt"">>
+): T {
+  return { ...entity, ...updates, updatedAt: new Date() };
+}
+
+const user = { id: ""1"", name: ""Alice"", createdAt: new Date(), updatedAt: new Date() };
+const updated = updateEntity(user, { name: ""Bob"" });
+// updated is fully typed with all original properties","// Bad: unconstrained generic accessing properties
+function getProperty<T>(obj: T, key: string): any {
+  return (obj as any)[key]; // No type safety
+}
+
+// Bad: using 'any' instead of proper constraints
+function updateEntity(entity: any, updates: any): any {
+  return { ...entity, ...updates, updatedAt: new Date() };
+}",high,https://www.typescriptlang.org/docs/handbook/2/generics.html#generic-constraints
+6,Mapped Types,Utility,"mapped types, Record, Partial, Required, Pick, Omit, keyof, in keyof","Mapped types transform existing types by iterating over their keys with the [K in keyof T] syntax. TypeScript's built-in utility types (Partial, Required, Readonly, Pick, Omit, Record) are all implemented as mapped types. Custom mapped types enable powerful type-level transformations.","Use built-in utility types for common transformations. Create custom mapped types for domain-specific transformations. Use key remapping with as to filter or rename keys. Combine mapped types with conditional types for advanced patterns.","Do not manually recreate types that Partial, Pick, Omit, or Record already provide. Do not nest too many mapped type operations making types unreadable. Do not forget that mapped types create new types rather than modifying originals.","// Custom mapped type: make all properties nullable
+type Nullable<T> = { [K in keyof T]: T[K] | null };
+
+// Key remapping: prefix all keys with 'get'
+type Getters<T> = {
+  [K in keyof T as `get${Capitalize<string & K>}`]: () => T[K]
+};
+
+interface User {
+  name: string;
+  age: number;
+  email: string;
+}
+
+type NullableUser = Nullable<User>;
+// { name: string | null; age: number | null; email: string | null }
+
+type UserGetters = Getters<User>;
+// { getName: () => string; getAge: () => number; getEmail: () => string }
+
+// Filter keys by value type
+type StringKeysOnly<T> = {
+  [K in keyof T as T[K] extends string ? K : never]: T[K]
+};
+type UserStrings = StringKeysOnly<User>;
+// { name: string; email: string }","// Bad: manually recreating mapped type logic
+interface NullableUser {
+  name: string | null;
+  age: number | null;
+  email: string | null;
+}
+// Must be manually updated when User changes
+
+// Bad: using Record when a mapped type is more appropriate
+type UserGetters = Record<string, () => unknown>;
+// Loses all type information about specific keys and return types",high,https://www.typescriptlang.org/docs/handbook/2/mapped-types.html
+7,Conditional Types,Advanced,"conditional type, extends, infer, distributive, type-level logic, ternary","Conditional types apply type-level if-then-else logic using the T extends U ? X : Y syntax. They distribute over union types by default, enabling powerful type transformations. Combined with the infer keyword, conditional types can extract and transform parts of complex types.","Use conditional types to create type-safe utility types. Leverage distribution over unions for per-member type logic. Use infer to extract inner types from generics, promises, arrays, and functions. Wrap in [] to prevent distribution when needed.","Do not create deeply nested conditional types that are impossible to debug. Do not forget that conditional types distribute over unions by default. Do not use conditional types when a simpler mapped type or overload would work.","// Extract the resolved type from a Promise
+type Awaited<T> = T extends Promise<infer U> ? Awaited<U> : T;
+
+// Flatten arrays one level
+type Flatten<T> = T extends Array<infer U> ? U : T;
+
+// Exclude null and undefined
+type NonNullable<T> = T extends null | undefined ? never : T;
+
+// Practical: extract event handler payload types
+type EventMap = {
+  click: { x: number; y: number };
+  keypress: { key: string; code: number };
+  scroll: { offset: number };
+};
+
+type EventPayload<E extends keyof EventMap> = EventMap[E];
+type ClickPayload = EventPayload<""click"">;
+// { x: number; y: number }
+
+// Non-distributive conditional (prevents union distribution)
+type IsArray<T> = [T] extends [unknown[]] ? true : false;","// Bad: deeply nested unreadable conditional type
+type Bad<T> = T extends string
+  ? T extends `${infer A}.${infer B}`
+    ? A extends `${infer C}-${infer D}`
+      ? [C, D, B]
+      : [A, B]
+    : T extends `${infer X}-${infer Y}`
+      ? [X, Y]
+      : [T]
+  : never;
+
+// Bad: using any and type assertions instead of conditional types
+type GetReturn = any; // Lost all type information",medium,https://www.typescriptlang.org/docs/handbook/2/conditional-types.html
+8,Template Literal Types,Types,"template literal, string type, pattern matching, route types, string manipulation","Template literal types combine literal types with string template syntax to create powerful string pattern types. TypeScript provides built-in string manipulation types (Uppercase, Lowercase, Capitalize, Uncapitalize) and supports inference within template patterns, enabling type-safe string manipulation.","Use template literal types for route patterns, event names, CSS properties, and API endpoints. Combine with mapped types for key remapping. Use string manipulation utility types for consistent casing. Leverage inference in template patterns for parsing.","Do not use plain string type when a template literal would provide safety. Do not create overly complex template patterns that slow down the type checker. Do not forget that template literal unions can grow exponentially.","// Type-safe event system
+type EventName = ""click"" | ""focus"" | ""blur"";
+type EventHandler = `on${Capitalize<EventName>}`;
+// ""onClick"" | ""onFocus"" | ""onBlur""
+
+// Route parameter extraction
+type ExtractParams<T extends string> =
+  T extends `${string}:${infer Param}/${infer Rest}`
+    ? Param | ExtractParams<`/${Rest}`>
+    : T extends `${string}:${infer Param}`
+      ? Param
+      : never;
+
+type RouteParams = ExtractParams<""/users/:userId/posts/:postId"">;
+// ""userId"" | ""postId""
+
+// CSS property builder
+type CSSUnit = ""px"" | ""rem"" | ""em"" | ""%"";
+type CSSValue = `${number}${CSSUnit}`;
+const margin: CSSValue = ""16px""; // OK
+// const bad: CSSValue = ""16vw""; // Error","// Bad: using plain string type for structured patterns
+type EventHandler = string;
+// No validation of handler name format
+
+function setRoute(path: string): void {
+  // No compile-time extraction of route params
+  // Must parse at runtime with no type safety
+}
+
+// Bad: accepting any string for CSS values
+function setMargin(value: string): void {
+  // ""banana"" is accepted with no error
+}",medium,https://www.typescriptlang.org/docs/handbook/2/template-literal-types.html
+9,Zod Schema Inference,Validation,"zod, schema, validation, inference, z.infer, runtime safety, parse","Zod is a TypeScript-first schema validation library that bridges the gap between runtime validation and compile-time types. Using z.infer<typeof schema> derives TypeScript types directly from Zod schemas, ensuring a single source of truth for both validation logic and static types.","Define Zod schemas as the single source of truth and derive TypeScript types with z.infer. Use schema.parse() for strict validation that throws, or schema.safeParse() for error handling. Compose schemas using z.object, z.union, z.intersection, and .extend().","Do not define separate TypeScript interfaces and Zod schemas that can drift apart. Do not use type assertions to bypass Zod validation. Do not catch and ignore Zod validation errors.","import { z } from ""zod"";
+
+const UserSchema = z.object({
+  id: z.string().uuid(),
+  name: z.string().min(1).max(100),
+  email: z.string().email(),
+  role: z.enum([""admin"", ""user"", ""moderator""]),
+  createdAt: z.coerce.date(),
+});
+
+// Derive type from schema - single source of truth
+type User = z.infer<typeof UserSchema>;
+
+const CreateUserSchema = UserSchema.omit({ id: true, createdAt: true });
+type CreateUserInput = z.infer<typeof CreateUserSchema>;
+
+function createUser(input: unknown): User {
+  const validated = CreateUserSchema.parse(input);
+  return {
+    ...validated,
+    id: crypto.randomUUID(),
+    createdAt: new Date(),
+  };
+}","// Bad: separate interface and schema that can drift
+interface User {
+  id: string;
+  name: string;
+  email: string;
+  role: ""admin"" | ""user"";  // Missing ""moderator""!
+}
+
+const UserSchema = z.object({
+  id: z.string().uuid(),
+  name: z.string(),
+  email: z.string().email(),
+  role: z.enum([""admin"", ""user"", ""moderator""]),
+});
+// Interface and schema are out of sync
+
+function createUser(input: any): User {
+  return input as User; // No runtime validation
+}",high,https://zod.dev/?id=basic-usage
+10,satisfies Operator,Types,"satisfies, type checking, type widening, inference, safe assignment","The satisfies operator (TypeScript 4.9+) validates that an expression matches a type without widening it. Unlike type annotations (: Type), satisfies preserves the narrowest inferred type while still ensuring conformance. This gives you both type safety and precise autocomplete.","Use satisfies when you want to validate conformance to a type while preserving literal types. Use it for configuration objects, route maps, and color palettes where you need both safety and precise inference. Combine with as const for maximum narrowness.","Do not use a type annotation (: Type) when you need to preserve literal types. Do not use satisfies when a simple type annotation suffices and you do not need narrow inference. Do not confuse satisfies with as (type assertion).","type RouteConfig = Record<string, { path: string; auth: boolean }>;
+
+// satisfies: validates shape BUT preserves literal types
+const routes = {
+  home:    { path: ""/"",         auth: false },
+  dashboard: { path: ""/dashboard"", auth: true },
+  profile: { path: ""/profile"",   auth: true },
+} satisfies RouteConfig;
+
+// Keys are narrowly typed: ""home"" | ""dashboard"" | ""profile""
+type RouteKey = keyof typeof routes;
+
+// Values preserve literal types
+const homePath = routes.home.path;
+// Type: ""/""  (not widened to string)
+
+// Type annotation would widen everything
+const routesAnnotated: RouteConfig = {
+  home:    { path: ""/"",         auth: false },
+  dashboard: { path: ""/dashboard"", auth: true },
+};
+// routesAnnotated.home.path is string, not ""/""","// Bad: type annotation widens literal types
+const routes: RouteConfig = {
+  home:    { path: ""/"",         auth: false },
+  dashboard: { path: ""/dashboard"", auth: true },
+};
+// typeof routes is just RouteConfig
+// routes.home.path is string, not ""/""
+// Object.keys(routes) loses specific key info
+
+// Bad: no type checking at all
+const routes2 = {
+  home: { path: ""/"", aut: false }, // Typo not caught!
+};",high,https://www.typescriptlang.org/docs/handbook/release-notes/typescript-4-9.html#the-satisfies-operator
+11,const Assertions (as const),Types,"as const, const assertion, literal type, readonly, immutable, narrow","The as const assertion tells TypeScript to infer the narrowest possible literal types for an expression. Arrays become readonly tuples, objects get readonly properties with literal value types, and string values become string literal types instead of widening to string.","Use as const for configuration objects, lookup tables, and enum-like constants. Combine with typeof to derive narrow union types from arrays. Use as const satisfies for both narrowing and validation. Apply to function return values for literal return types.","Do not use as const on mutable data structures that need to be modified. Do not confuse as const with Object.freeze (as const is compile-time only). Do not apply as const unnecessarily to types that are already narrow.","// Derive union type from array
+const ROLES = [""admin"", ""user"", ""moderator""] as const;
+type Role = (typeof ROLES)[number];
+// ""admin"" | ""user"" | ""moderator""
+
+// Config with literal types preserved
+const CONFIG = {
+  apiUrl: ""https://api.example.com"",
+  timeout: 5000,
+  retries: 3,
+} as const;
+// typeof CONFIG.apiUrl is ""https://api.example.com"", not string
+
+// Tuple inference for function returns
+function getCoords() {
+  return [40.7128, -74.0060] as const;
+}
+// Return type: readonly [40.7128, -74.006]
+
+// Combined with satisfies for validation + narrowing
+const STATUSES = [""pending"", ""active"", ""archived""] as const satisfies readonly string[];
+type Status = (typeof STATUSES)[number];","// Bad: array widens to string[]
+const ROLES = [""admin"", ""user"", ""moderator""];
+// type is string[], not a tuple of literals
+type Role = (typeof ROLES)[number]; // string, not the union
+
+// Bad: object values widen
+const CONFIG = {
+  apiUrl: ""https://api.example.com"",
+  timeout: 5000,
+};
+// CONFIG.apiUrl is string, CONFIG.timeout is number
+
+// Bad: tuple return type lost
+function getCoords() {
+  return [40.7128, -74.0060];
+}
+// Return type: number[], not readonly [40.7128, -74.006]",high,https://www.typescriptlang.org/docs/handbook/release-notes/typescript-3-4.html#const-assertions
+12,Utility Types (Readonly and ReadonlyArray),Utility,"Readonly, ReadonlyArray, immutable, readonly, deep readonly, freeze","Readonly<T> makes all properties of T readonly at the type level, preventing reassignment. ReadonlyArray<T> (or readonly T[]) removes mutating methods like push, pop, and splice. These types enforce immutability at compile time, complementing functional programming patterns and preventing accidental state mutations.","Use Readonly<T> for function parameters that should not be mutated. Use ReadonlyArray<T> or readonly T[] for arrays that should not be modified. Create DeepReadonly utility types for nested immutability. Use readonly on class properties and interface fields wherever mutation is unintended.","Do not assume Readonly prevents runtime mutation (it is compile-time only). Do not use Readonly on types that genuinely need mutation (state setters, builders). Do not confuse Readonly<T> with Object.freeze at runtime.","// Readonly prevents property reassignment
+interface Config {
+  host: string;
+  port: number;
+  debug: boolean;
+}
+
+function startServer(config: Readonly<Config>): void {
+  console.log(`Starting on ${config.host}:${config.port}`);
+  // config.port = 8080; // Error: Cannot assign to 'port'
+}
+
+// ReadonlyArray prevents mutation methods
+function processItems(items: readonly string[]): string {
+  // items.push(""new""); // Error: Property 'push' does not exist
+  // items[0] = ""x"";    // Error: Index signature only permits reading
+  return items.join("", "");
+}
+
+// Deep readonly for nested structures
+type DeepReadonly<T> = {
+  readonly [K in keyof T]: T[K] extends object ? DeepReadonly<T[K]> : T[K];
+};","// Bad: mutable parameters allow accidental mutation
+function processItems(items: string[]): string {
+  items.push(""extra""); // Mutates the caller's array!
+  items.sort();          // Mutates in place!
+  return items.join("", "");
+}
+
+// Bad: no readonly on config object
+function startServer(config: Config): void {
+  config.debug = false; // Accidentally mutates shared config
+}",medium,https://www.typescriptlang.org/docs/handbook/utility-types.html#readonlytype
+13,Function Overloads,Functions,"overload, overloads, function signature, polymorphic, multiple signatures","Function overloads let you define multiple call signatures for a single function, enabling different return types based on input types. The implementation signature must be compatible with all overload signatures. This provides precise type information to callers while keeping implementation in one place.","Use overloads when the return type depends on the argument types. Keep the number of overloads manageable (2-4). Order overloads from most specific to least specific. Use conditional types as an alternative for simple cases.","Do not create excessive overloads when a generic or union type would suffice. Do not make the implementation signature public (it should not be callable). Do not use overloads for optional parameters that do not change the return type.","// Overloads: return type depends on input type
+function createElement(tag: ""a""): HTMLAnchorElement;
+function createElement(tag: ""canvas""): HTMLCanvasElement;
+function createElement(tag: ""input""): HTMLInputElement;
+function createElement(tag: string): HTMLElement;
+function createElement(tag: string): HTMLElement {
+  return document.createElement(tag);
+}
+
+const anchor = createElement(""a"");
+// Type: HTMLAnchorElement (precise!)
+anchor.href = ""https://example.com"";
+
+// Overload: different return based on options
+function fetchData(url: string, opts: { raw: true }): Promise<Buffer>;
+function fetchData(url: string, opts?: { raw?: false }): Promise<string>;
+function fetchData(url: string, opts?: { raw?: boolean }): Promise<string | Buffer> {
+  // implementation
+  return fetch(url).then(r => opts?.raw ? r.arrayBuffer() as any : r.text());
+}","// Bad: single signature loses return type precision
+function createElement(tag: string): HTMLElement {
+  return document.createElement(tag);
+}
+const anchor = createElement(""a"");
+// Type: HTMLElement (not HTMLAnchorElement)
+// anchor.href // Error: Property 'href' does not exist on HTMLElement
+
+// Bad: using type assertion at every call site
+const anchor2 = document.createElement(""a"") as HTMLAnchorElement;
+// Must manually assert at every usage",medium,https://www.typescriptlang.org/docs/handbook/2/functions.html#function-overloads
+14,unknown vs any,Safety,"unknown, any, type safety, type assertion, narrowing, safe handling","The unknown type is the type-safe counterpart to any. Both accept any value, but unknown requires type narrowing before use, while any bypasses all type checking. Preferring unknown forces developers to validate data before operating on it, catching errors at compile time rather than runtime.","Use unknown for values of genuinely uncertain type (API responses, JSON.parse results, user input). Narrow unknown values with type guards, typeof checks, or validation libraries like Zod. Use unknown in catch blocks (useUnknownInCatchVariables).","Do not use any as a convenience to avoid writing type guards. Do not pass any-typed values through your codebase without narrowing. Do not disable the noImplicitAny compiler flag.","// Safe: unknown forces validation before use
+function processInput(input: unknown): string {
+  if (typeof input === ""string"") {
+    return input.toUpperCase();
+  }
+  if (typeof input === ""number"") {
+    return input.toFixed(2);
+  }
+  throw new Error(""Unsupported input type"");
+}
+
+// Safe error handling with unknown
+async function fetchData(url: string): Promise<string> {
+  try {
+    const res = await fetch(url);
+    return await res.text();
+  } catch (error: unknown) {
+    if (error instanceof Error) {
+      throw new Error(`Fetch failed: ${error.message}`);
+    }
+    throw new Error(""Fetch failed with unknown error"");
+  }
+}","// Bad: any disables all type checking
+function processInput(input: any): string {
+  return input.toUppercase(); // Typo not caught! Runtime error
+}
+
+// Bad: catch with any skips validation
+async function fetchData(url: string): Promise<string> {
+  try {
+    const res = await fetch(url);
+    return await res.text();
+  } catch (error: any) {
+    // error.mesage typo not caught by compiler
+    console.log(error.mesage);
+    throw error;
+  }
+}",critical,https://www.typescriptlang.org/docs/handbook/2/functions.html#unknown
+15,Type-Only Imports,Modules,"import type, type-only import, tree shaking, elision, isolatedModules, erasure","Type-only imports (import type { T }) and exports (export type { T }) signal that the imported binding is used only as a type and should be completely erased during compilation. This enables better tree shaking, prevents runtime side effects from type-only modules, and is required when using isolatedModules.","Use import type for all imports that are only used in type positions. Enable verbatimModuleSyntax or isolatedModules to enforce correct usage. Use inline type modifiers (import { type T, value }) when mixing type and value imports.","Do not use regular imports for types when using bundlers that benefit from type elision. Do not mix type-only and value imports when the type import triggers side effects. Do not ignore verbatimModuleSyntax errors.","// Type-only import: completely erased at runtime
+import type { User, Config } from ""./types"";
+import type { Request, Response } from ""express"";
+
+// Inline type modifier: mix types and values
+import { createServer, type ServerOptions } from ""./server"";
+
+// Type-only export
+export type { User, Config };
+
+// Used only in type positions
+function handleRequest(req: Request, res: Response): void {
+  const user: User = req.body;
+  res.json(user);
+}
+
+// tsconfig.json
+// { ""compilerOptions"": { ""verbatimModuleSyntax"": true } }","// Bad: regular import for type-only usage
+import { User, Config } from ""./types"";
+// May prevent tree shaking if module has side effects
+// Fails with isolatedModules if types.ts only exports types
+
+// Bad: importing entire module for one type
+import * as Express from ""express"";
+function handle(req: Express.Request): void { }
+// Imports the entire express module at runtime unnecessarily",medium,https://www.typescriptlang.org/docs/handbook/release-notes/typescript-3-8.html#type-only-imports-and-export
+16,Index Signatures and Record,Types,"index signature, Record, dynamic keys, dictionary, mapped access, string index","Index signatures ([key: string]: ValueType) allow objects to have dynamic keys with typed values. Record<K, V> is the utility type equivalent for creating dictionary types. Both enable type-safe handling of objects whose keys are not known at compile time, such as lookup tables and caches.","Use Record<K, V> for dictionary types with known key types. Enable noUncheckedIndexedAccess to force undefined checks on index access. Use template literal keys for patterned dynamic keys. Prefer Map<K, V> over index signatures when keys are not plain strings.","Do not forget that index signatures make every property access possibly undefined (with noUncheckedIndexedAccess). Do not use index signatures when the keys are known at compile time (use explicit properties). Do not mix known and dynamic properties without understanding precedence.","// Record utility type for dictionaries
+type StatusMessages = Record<number, string>;
+const httpMessages: StatusMessages = {
+  200: ""OK"",
+  404: ""Not Found"",
+  500: ""Internal Server Error"",
+};
+
+// Index signature with noUncheckedIndexedAccess
+interface Cache {
+  [key: string]: string;
+}
+
+function getFromCache(cache: Cache, key: string): string | undefined {
+  const value = cache[key];
+  // With noUncheckedIndexedAccess, value is string | undefined
+  return value;
+}
+
+// Template literal index signature
+interface EnvironmentVars {
+  [key: `NEXT_PUBLIC_${string}`]: string;
+  NODE_ENV: ""development"" | ""production"" | ""test"";
+}","// Bad: no undefined check on dynamic access
+interface Cache {
+  [key: string]: string;
+}
+function getFromCache(cache: Cache, key: string): string {
+  return cache[key]; // Without noUncheckedIndexedAccess, no warning
+  // Runtime: could be undefined, causing downstream crash
+}
+
+// Bad: using index signature when keys are known
+interface Config {
+  [key: string]: string | number;
+}
+// Loses autocompletion and specific value types
+// Should use explicit properties instead",medium,https://www.typescriptlang.org/docs/handbook/2/objects.html#index-signatures
+17,Intersection Types for Mixins,Types,"intersection, mixin, type composition, ampersand, merge, combine","Intersection types (&) combine multiple types into one that has all properties from each constituent type. This enables mixin patterns where behaviors are composed from smaller, focused types. Unlike extends in interfaces, intersections work with any types including unions and primitives.","Use intersection types to compose small, focused types into larger ones. Use intersections for mixin patterns that add cross-cutting concerns (timestamps, metadata, audit fields). Combine intersections with generics for reusable wrappers.","Do not intersect types with conflicting property types (creates never for that property). Do not use deep intersections when interface extension would be clearer. Do not create intersections with many (5+) constituents making the resulting type hard to understand.","// Composable mixins via intersection
+type WithId = { id: string };
+type WithTimestamps = { createdAt: Date; updatedAt: Date };
+type WithSoftDelete = { deletedAt: Date | null; isDeleted: boolean };
+
+type BaseEntity = WithId & WithTimestamps;
+
+interface UserFields {
+  name: string;
+  email: string;
+}
+
+type User = UserFields & BaseEntity & WithSoftDelete;
+
+// Generic mixin wrapper
+type WithMetadata<T> = T & {
+  metadata: Record<string, unknown>;
+  version: number;
+};
+
+type VersionedUser = WithMetadata<User>;
+
+function createEntity<T>(fields: T): T & BaseEntity {
+  return {
+    ...fields,
+    id: crypto.randomUUID(),
+    createdAt: new Date(),
+    updatedAt: new Date(),
+  };
+}","// Bad: duplicating common fields across every type
+interface User {
+  id: string;
+  name: string;
+  email: string;
+  createdAt: Date;
+  updatedAt: Date;
+  deletedAt: Date | null;
+  isDeleted: boolean;
+}
+
+interface Post {
+  id: string;
+  title: string;
+  createdAt: Date;
+  updatedAt: Date;
+  deletedAt: Date | null;
+  isDeleted: boolean;
+}
+// Repeated fields in every entity, no reuse",medium,https://www.typescriptlang.org/docs/handbook/2/objects.html#intersection-types
+18,Enum Alternatives (as const objects),Patterns,"enum, const object, as const, enum alternative, string union, lookup","TypeScript enums have several pitfalls: they generate runtime code, numeric enums allow reverse mapping that can cause bugs, and they do not work well with tree shaking. Using as const objects with derived union types provides the same functionality with better tree shaking, more predictable behavior, and full structural compatibility.","Use as const objects for enum-like constants. Derive union types with typeof obj[keyof typeof obj]. Export both the const object (for values) and the derived type. Use this pattern for string constants, status codes, and configuration flags.","Do not use numeric enums which allow unsafe reverse mapping. Do not use const enum as it has inconsistent behavior across module systems. Do not create enums for simple string union types that need no runtime value.","// as const object: best enum alternative
+const HttpStatus = {
+  OK: 200,
+  NotFound: 404,
+  InternalError: 500,
+  BadRequest: 400,
+} as const;
+
+// Derive type from values
+type HttpStatus = (typeof HttpStatus)[keyof typeof HttpStatus];
+// 200 | 404 | 500 | 400
+
+// Derive type from keys
+type HttpStatusName = keyof typeof HttpStatus;
+// ""OK"" | ""NotFound"" | ""InternalError"" | ""BadRequest""
+
+function handleStatus(status: HttpStatus): string {
+  switch (status) {
+    case HttpStatus.OK: return ""Success"";
+    case HttpStatus.NotFound: return ""Not Found"";
+    case HttpStatus.InternalError: return ""Server Error"";
+    case HttpStatus.BadRequest: return ""Bad Request"";
+  }
+}
+
+// For simple strings, just use a union
+type Direction = ""north"" | ""south"" | ""east"" | ""west"";","// Bad: numeric enum with reverse mapping pitfalls
+enum HttpStatus {
+  OK = 200,
+  NotFound = 404,
+}
+// HttpStatus[200] === ""OK"" -- reverse mapping is unexpected
+// HttpStatus[999] === undefined -- no compile error!
+
+// Bad: const enum has bundler issues
+const enum Direction {
+  Up = ""UP"",
+  Down = ""DOWN"",
+}
+// Inlined at compile time, breaks with isolatedModules
+// Cannot be used as a runtime value in some contexts",high,https://www.typescriptlang.org/docs/handbook/enums.html
+19,Generic Factory Functions,Generics,"factory, generic factory, type inference, creation pattern, constructor type","Generic factory functions use type parameters to create instances of different types while preserving full type information. They leverage TypeScript's type inference to determine the output type from the input, avoiding the need for manual type annotations at call sites. This pattern is essential for dependency injection, builders, and typed configuration.","Use generic factory functions when the output type depends on the input. Constrain factory generics to ensure the created type meets interface requirements. Use constructor type parameters { new(...args: any[]): T } for class factories. Return the specific generic type, not a base type.","Do not return a widened base type from a factory losing specific type information. Do not use any for factory return types. Do not create factories without generic constraints, allowing invalid types to be passed.","// Generic factory with constraint
+interface Entity {
+  id: string;
+  createdAt: Date;
+}
+
+function createEntity<T extends Record<string, unknown>>(
+  fields: T
+): T & Entity {
+  return {
+    ...fields,
+    id: crypto.randomUUID(),
+    createdAt: new Date(),
+  };
+}
+
+// Type is inferred precisely
+const user = createEntity({ name: ""Alice"", email: ""alice@test.com"" });
+// Type: { name: string; email: string } & Entity
+
+// Class constructor factory
+function createInstance<T>(
+  ctor: new (...args: any[]) => T,
+  ...args: ConstructorParameters<typeof ctor>
+): T {
+  return new ctor(...args);
+}
+
+class UserService {
+  constructor(public readonly baseUrl: string) {}
+}
+const svc = createInstance(UserService, ""https://api.example.com"");
+// Type: UserService","// Bad: factory returns base type, losing specifics
+function createEntity(fields: Record<string, unknown>): Entity {
+  return {
+    ...fields,
+    id: crypto.randomUUID(),
+    createdAt: new Date(),
+  } as Entity;
+}
+const user = createEntity({ name: ""Alice"" });
+// Type: Entity -- lost name and email properties
+
+// Bad: any-typed factory
+function createInstance(ctor: any, ...args: any[]): any {
+  return new ctor(...args);
+}
+// No type safety at all",medium,https://www.typescriptlang.org/docs/handbook/2/generics.html
+20,Recursive Types,Advanced,"recursive type, self-referencing, tree, JSON, nested, linked list","Recursive types reference themselves in their definition, enabling type-safe modeling of inherently recursive data structures like trees, linked lists, JSON values, nested menus, and file system hierarchies. TypeScript fully supports recursive type aliases and interfaces for these patterns.","Use recursive types for tree structures, JSON schemas, nested configurations, and file system models. Use interfaces for recursive object types (better error messages and performance). Combine with generics for reusable recursive patterns. Add a base case (non-recursive variant) to terminate the recursion.","Do not create infinitely recursive types without a base case. Do not use deeply nested recursive type operations that slow down the type checker. Do not use recursive types where a flat structure with references (id-based) would be more practical.","// JSON value type (recursive)
+type JsonValue =
+  | string
+  | number
+  | boolean
+  | null
+  | JsonValue[]
+  | { [key: string]: JsonValue };
+
+// Tree node (recursive with generics)
+interface TreeNode<T> {
+  value: T;
+  children: TreeNode<T>[];
+}
+
+const fileTree: TreeNode<string> = {
+  value: ""src"",
+  children: [
+    { value: ""index.ts"", children: [] },
+    {
+      value: ""utils"",
+      children: [
+        { value: ""helpers.ts"", children: [] },
+      ],
+    },
+  ],
+};
+
+// Deep partial (recursive utility type)
+type DeepPartial<T> = {
+  [K in keyof T]?: T[K] extends object ? DeepPartial<T[K]> : T[K];
+};","// Bad: using 'any' for recursive data
+type JsonValue = any;
+// No type safety for nested structures
+
+// Bad: non-recursive type with fixed depth
+interface TreeNode {
+  value: string;
+  children: {
+    value: string;
+    children: {
+      value: string;
+      children: any[]; // Gives up after 3 levels
+    }[];
+  }[];
+}",medium,https://www.typescriptlang.org/docs/handbook/release-notes/typescript-3-7.html#more-recursive-type-aliases
+21,Type Assertion Functions (asserts),Guards,"asserts, assertion function, type narrowing, assert, invariant, guard","Assertion functions use the asserts return type to narrow types by throwing an error if the condition fails. After calling an assertion function, TypeScript narrows the type in the remaining scope. This pattern replaces manual if-throw checks with reusable, type-aware assertion utilities.","Use assertion functions for precondition checks that should throw on failure. Name assertion functions clearly (assertIsString, assertNonNull, invariant). Use the asserts condition syntax for boolean checks and asserts value is Type for type narrowing. Keep assertions at function entry points.","Do not use assertion functions for non-exceptional flow control. Do not forget that assertion functions must throw (never return normally on failure). Do not use assertion functions when a type guard (returning boolean) would be more appropriate.","// Basic assertion function
+function assertNonNull<T>(
+  value: T | null | undefined,
+  message?: string
+): asserts value is T {
+  if (value === null || value === undefined) {
+    throw new Error(message ?? ""Expected non-null value"");
+  }
+}
+
+// Assertion with condition
+function assert(
+  condition: unknown,
+  message: string
+): asserts condition {
+  if (!condition) throw new Error(message);
+}
+
+// Usage: type narrows after assertion
+function processUser(user: User | null): string {
+  assertNonNull(user, ""User is required"");
+  // TypeScript now knows user is User (not null)
+  return user.name.toUpperCase();
+}
+
+// Assertion for specific types
+function assertIsString(val: unknown): asserts val is string {
+  if (typeof val !== ""string"") throw new TypeError(""Expected string"");
+}","// Bad: manual null checks without narrowing helpers
+function processUser(user: User | null): string {
+  if (user === null) {
+    throw new Error(""User is required"");
+  }
+  // Repetitive: must write this check in every function
+  return user.name.toUpperCase();
+}
+
+// Bad: non-null assertion operator (!)
+function processUser2(user: User | null): string {
+  return user!.name.toUpperCase();
+  // No runtime check: crashes if user is null
+}",medium,https://www.typescriptlang.org/docs/handbook/release-notes/typescript-3-7.html#assertion-functions
+22,Infer Keyword in Conditional Types,Advanced,"infer, conditional type, type extraction, pattern matching, unwrap","The infer keyword within conditional types declares a type variable that TypeScript infers from the matched pattern. It enables extracting inner types from generics (Promise<T>), function signatures (parameters and return types), tuple elements, and complex nested structures without manual type annotation.","Use infer to extract return types, parameter types, promise payloads, and array element types. Use infer with template literal types for string parsing. Use multiple infer declarations in a single conditional for extracting several parts. Name inferred variables descriptively.","Do not use infer outside of conditional type extends clauses. Do not create deeply nested infer chains that are hard to follow. Do not use infer when a built-in utility type (ReturnType, Parameters, Awaited) already exists.","// Extract function return type
+type MyReturnType<T> = T extends (...args: any[]) => infer R ? R : never;
+
+// Extract Promise inner type
+type UnwrapPromise<T> = T extends Promise<infer U> ? U : T;
+
+// Extract array element type
+type ElementOf<T> = T extends (infer E)[] ? E : never;
+
+// Extract first and rest from tuple
+type Head<T extends any[]> = T extends [infer H, ...any[]] ? H : never;
+type Tail<T extends any[]> = T extends [any, ...infer R] ? R : [];
+
+// Practical: extract route params from path string
+type ExtractParam<T extends string> =
+  T extends `${string}:${infer P}/${infer Rest}`
+    ? P | ExtractParam<Rest>
+    : T extends `${string}:${infer P}`
+      ? P
+      : never;
+
+type Params = ExtractParam<""/api/:version/users/:id"">;
+// ""version"" | ""id""","// Bad: manually specifying types instead of inferring
+type GetUsersReturn = { id: string; name: string }[];
+// Must be manually kept in sync with the actual function
+
+// Bad: using any instead of infer for extraction
+type UnwrapPromise<T> = T extends Promise<any> ? any : T;
+// Loses the inner type completely
+
+// Bad: reimplementing built-in utility types
+type MyParameters<T> = any; // Just use Parameters<T>",medium,https://www.typescriptlang.org/docs/handbook/2/conditional-types.html#inferring-within-conditional-types
+23,Module Augmentation,Modules,"module augmentation, declaration merging, extend, third-party, global","Module augmentation lets you add new declarations to existing modules without modifying their source code. This is essential for extending third-party library types, adding custom properties to Express Request, augmenting global interfaces like Window, and declaring environment variables in process.env.","Use module augmentation to extend third-party types through declaration merging. Place augmentations in .d.ts files or in files with top-level imports/exports. Always augment the original module path exactly. Use global augmentation (declare global) for global scope modifications.","Do not modify node_modules type definitions directly. Do not forget the top-level import/export to make the file a module (required for augmentation). Do not augment with conflicting property types that cause errors at usage sites.","// Augment Express Request with custom properties
+import { User } from ""./models/user"";
+
+declare module ""express-serve-static-core"" {
+  interface Request {
+    user?: User;
+    requestId: string;
+  }
+}
+
+// Now TypeScript knows about req.user and req.requestId
+// in all Express route handlers
+
+// Augment environment variables
+declare global {
+  namespace NodeJS {
+    interface ProcessEnv {
+      DATABASE_URL: string;
+      JWT_SECRET: string;
+      NODE_ENV: ""development"" | ""production"" | ""test"";
+    }
+  }
+}
+
+// process.env.DATABASE_URL is typed as string (not string | undefined)
+
+// Augment a third-party library
+declare module ""next-auth"" {
+  interface Session {
+    user: { id: string; role: string } & DefaultSession[""user""];
+  }
+}","// Bad: modifying types in node_modules directly
+// Edits are lost on npm install
+
+// Bad: using type assertion everywhere instead of augmenting
+app.get(""/api"", (req, res) => {
+  const user = (req as any).user; // No type safety
+  const id = (req as any).requestId; // Repeated unsafe casts
+});
+
+// Bad: forgetting the export to make it a module
+// file: env.d.ts (missing export {})
+declare namespace NodeJS {
+  interface ProcessEnv {
+    DATABASE_URL: string;
+  }
+}
+// This overrides instead of augments!",high,https://www.typescriptlang.org/docs/handbook/declaration-merging.html#module-augmentation
+24,Variance Annotations (in/out),Advanced,"variance, in, out, covariance, contravariance, invariance, TypeScript 5","TypeScript 5.0 introduced explicit variance annotations for generic type parameters. The out modifier marks a covariant parameter (used in output/return positions), and in marks a contravariant parameter (used in input/parameter positions). These annotations improve type-checking speed and make variance intent explicit.","Use out for type parameters that appear only in output positions (return types, property reads). Use in for type parameters that appear only in input positions (function parameters, write-only properties). Use in out for invariant parameters that appear in both positions. Add variance annotations to interfaces with many type relationships.","Do not add incorrect variance annotations (TypeScript will error if they conflict). Do not use variance annotations on type aliases (only interfaces and classes). Do not add variance annotations purely for style when the generic has few implementations.","// Covariant: T only in output position
+interface ReadonlyBox<out T> {
+  get value(): T;
+}
+
+// Contravariant: T only in input position
+interface Writer<in T> {
+  write(value: T): void;
+}
+
+// Invariant: T in both positions
+interface MutableBox<in out T> {
+  get value(): T;
+  set value(newValue: T);
+}
+
+// Practical example: event handler variance
+interface EventProducer<out T> {
+  subscribe(handler: (event: T) => void): void;
+}
+
+interface EventConsumer<in T> {
+  handle(event: T): void;
+}
+
+// Covariance allows: Producer<Cat> assignable to Producer<Animal>
+// Contravariance allows: Consumer<Animal> assignable to Consumer<Cat>","// Bad: no variance annotations on complex generic hierarchies
+interface ReadonlyBox<T> {
+  get value(): T;
+}
+// TypeScript must structurally analyze every use
+// to determine variance, which is slower
+
+interface Writer<T> {
+  write(value: T): void;
+}
+// Intent is unclear: is T meant to be used only as input?
+
+// Bad: incorrect variance for the usage
+// interface ReadonlyBox<in T> { // Error: T is used in output position
+//   get value(): T;
+// }",low,https://www.typescriptlang.org/docs/handbook/release-notes/typescript-5-0.html#explicit-variance-annotations
+25,Using NoInfer Utility Type,Advanced,"NoInfer, inference, type parameter, TypeScript 5.4, inference control, generic","NoInfer<T> (TypeScript 5.4+) prevents TypeScript from using a particular type position for generic type inference. This forces inference to happen at other positions, solving common problems where TypeScript infers a wider type than intended from default values, fallback parameters, or secondary arguments.","Use NoInfer<T> on parameters that should not drive type inference (defaults, fallbacks, options). Use it when one parameter should determine the generic type and others should conform. Apply it in function signatures where the inferred type is undesirably widened by a secondary argument.","Do not use NoInfer on the primary parameter that should drive inference. Do not use NoInfer when all parameters should contribute equally to inference. Do not use NoInfer as a replacement for explicit generic type parameters when clarity demands them.","// Without NoInfer: default value widens the type
+function getOrDefault<T>(values: T[], defaultValue: NoInfer<T>): T {
+  return values.length > 0 ? values[0] : defaultValue;
+}
+
+// T is inferred from 'values' only, not from defaultValue
+const result = getOrDefault([""a"", ""b""], ""default"");
+// T is ""a"" | ""b"" (not string)
+
+// Practical: typed event emitter
+function createEmitter<T extends string>(
+  validEvents: T[],
+  defaultEvent: NoInfer<T>
+): { emit: (event: T) => void } {
+  return {
+    emit: (event) => console.log(event),
+  };
+}
+
+const emitter = createEmitter([""click"", ""hover""], ""click"");
+// T is ""click"" | ""hover""
+emitter.emit(""click""); // OK
+// emitter.emit(""scroll""); // Error: not in union","// Bad: without NoInfer, default value widens the type
+function getOrDefault<T>(values: T[], defaultValue: T): T {
+  return values.length > 0 ? values[0] : defaultValue;
+}
+
+const result = getOrDefault([""a"", ""b""], ""default"");
+// T is string (widened because ""default"" contributed to inference)
+// No error even if you pass a value not in the original array
+
+function createEmitter<T extends string>(
+  validEvents: T[],
+  defaultEvent: T
+) {
+  return { emit: (event: T) => console.log(event) };
+}
+const emitter = createEmitter([""click"", ""hover""], ""anything"");
+// T is ""click"" | ""hover"" | ""anything"" -- polluted!",medium,https://www.typescriptlang.org/docs/handbook/release-notes/typescript-5-4.html#the-noinfer-utility-type
